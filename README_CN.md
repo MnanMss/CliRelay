@@ -103,6 +103,19 @@ requires_openai_auth = true
 - 🔐 OAuth 服务商管理
 - 📋 结构化日志查看
 
+<details>
+<summary>📸 前端面板截图</summary>
+
+<p align="center">
+  <img src="assets/codeproxy/iShot_2026-03-06_10.51.59.png" width="48%" />
+  <img src="assets/codeproxy/iShot_2026-03-06_10.52.09.png" width="48%" />
+</p>
+<p align="center">
+  <img src="assets/codeproxy/iShot_2026-03-06_10.52.33.png" width="48%" />
+  <img src="assets/codeproxy/iShot_2026-03-06_10.54.03.png" width="48%" />
+</p>
+</details>
+
 ```bash
 # 克隆并启动管理面板
 git clone https://github.com/kittors/codeProxy.git

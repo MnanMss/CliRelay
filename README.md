@@ -103,6 +103,19 @@ The **[codeProxy](https://github.com/kittors/codeProxy)** frontend provides a mo
 - 🔐 OAuth provider management
 - 📋 Structured log viewer
 
+<details>
+<summary>📸 Dashboard Screenshots</summary>
+
+<p align="center">
+  <img src="assets/codeproxy/iShot_2026-03-06_10.51.59.png" width="48%" />
+  <img src="assets/codeproxy/iShot_2026-03-06_10.52.09.png" width="48%" />
+</p>
+<p align="center">
+  <img src="assets/codeproxy/iShot_2026-03-06_10.52.33.png" width="48%" />
+  <img src="assets/codeproxy/iShot_2026-03-06_10.54.03.png" width="48%" />
+</p>
+</details>
+
 ```bash
 # Clone and start the management panel
 git clone https://github.com/kittors/codeProxy.git
