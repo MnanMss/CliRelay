@@ -16,6 +16,7 @@ type Record struct {
 	AuthID      string
 	AuthIndex   string
 	Source      string
+	ChannelName string
 	RequestedAt time.Time
 	LatencyMs   int64
 	Failed      bool

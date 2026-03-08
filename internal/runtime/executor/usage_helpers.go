@@ -22,6 +22,7 @@ type usageReporter struct {
 	authIndex   string
 	apiKey      string
 	source      string
+	channelName string
 	requestedAt time.Time
 	once        sync.Once
 }
@@ -38,6 +39,7 @@ func newUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 	if auth != nil {
 		reporter.authID = auth.ID
 		reporter.authIndex = auth.EnsureIndex()
+		reporter.channelName = strings.TrimSpace(auth.Label)
 	}
 	return reporter
 }
@@ -81,6 +83,7 @@ func (r *usageReporter) publishWithOutcome(ctx context.Context, detail usage.Det
 			Provider:    r.provider,
 			Model:       r.model,
 			Source:      r.source,
+			ChannelName: r.channelName,
 			APIKey:      r.apiKey,
 			AuthID:      r.authID,
 			AuthIndex:   r.authIndex,
@@ -109,6 +112,7 @@ func (r *usageReporter) ensurePublished(ctx context.Context) {
 			Provider:    r.provider,
 			Model:       r.model,
 			Source:      r.source,
+			ChannelName: r.channelName,
 			APIKey:      r.apiKey,
 			AuthID:      r.authID,
 			AuthIndex:   r.authIndex,
