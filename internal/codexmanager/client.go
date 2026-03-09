@@ -16,15 +16,16 @@ import (
 )
 
 const (
-	rpcMethodAccountList          = "account/list"
-	rpcMethodAccountImport        = "account/import"
-	rpcMethodAccountDelete        = "account/delete"
-	rpcMethodAccountLoginStart    = "account/login/start"
-	rpcMethodAccountLoginStatus   = "account/login/status"
-	rpcMethodAccountLoginComplete = "account/login/complete"
-	rpcMethodUsageRead            = "account/usage/read"
-	rpcMethodUsageList            = "account/usage/list"
-	rpcMethodUsageRefresh         = "account/usage/refresh"
+	rpcMethodAccountList                  = "account/list"
+	rpcMethodAccountImport                = "account/import"
+	rpcMethodAccountDelete                = "account/delete"
+	rpcMethodAccountDeleteUnavailableFree = "account/deleteUnavailableFree"
+	rpcMethodAccountLoginStart            = "account/login/start"
+	rpcMethodAccountLoginStatus           = "account/login/status"
+	rpcMethodAccountLoginComplete         = "account/login/complete"
+	rpcMethodUsageRead                    = "account/usage/read"
+	rpcMethodUsageList                    = "account/usage/list"
+	rpcMethodUsageRefresh                 = "account/usage/refresh"
 
 	defaultRPCEndpointPath   = "/rpc"
 	defaultRPCRequestTimeout = 8 * time.Second
@@ -48,6 +49,7 @@ type RPCClientAPI interface {
 	ListAccounts(ctx context.Context, params RPCAccountListParams) (RPCAccountListResult, error)
 	ImportAccounts(ctx context.Context, contents []string) (RPCAccountImportResult, error)
 	DeleteAccount(ctx context.Context, accountID string) error
+	DeleteUnavailableFreeAccounts(ctx context.Context) (RPCDeleteUnavailableFreeResult, error)
 	StartLogin(ctx context.Context, req RPCLoginStartRequest) (RPCLoginStartResult, error)
 	GetLoginStatus(ctx context.Context, loginID string) (RPCLoginStatusResult, error)
 	CompleteLogin(ctx context.Context, req RPCLoginCompleteRequest) error
@@ -122,6 +124,16 @@ type RPCAccountImportResult struct {
 	Updated int64                   `json:"updated"`
 	Failed  int64                   `json:"failed"`
 	Errors  []RPCAccountImportError `json:"errors"`
+}
+
+type RPCDeleteUnavailableFreeResult struct {
+	Scanned             int64    `json:"scanned"`
+	Deleted             int64    `json:"deleted"`
+	SkippedAvailable    int64    `json:"skippedAvailable"`
+	SkippedNonFree      int64    `json:"skippedNonFree"`
+	SkippedMissingUsage int64    `json:"skippedMissingUsage"`
+	SkippedMissingToken int64    `json:"skippedMissingToken"`
+	DeletedAccountIDs   []string `json:"deletedAccountIds"`
 }
 
 type RPCLoginStartRequest struct {
@@ -318,6 +330,15 @@ func (c *RPCClient) DeleteAccount(ctx context.Context, accountID string) error {
 	)
 }
 
+func (c *RPCClient) DeleteUnavailableFreeAccounts(ctx context.Context) (RPCDeleteUnavailableFreeResult, error) {
+	var out RPCDeleteUnavailableFreeResult
+	err := c.call(ctx, rpcMethodAccountDeleteUnavailableFree, nil, false, &out)
+	if err != nil {
+		return RPCDeleteUnavailableFreeResult{}, err
+	}
+	return out, nil
+}
+
 func (c *RPCClient) StartLogin(ctx context.Context, req RPCLoginStartRequest) (RPCLoginStartResult, error) {
 	loginType := strings.TrimSpace(req.Type)
 	if loginType == "" {
@@ -421,6 +442,10 @@ func (c *RPCClient) AccountImport(ctx context.Context, contents []string) (RPCAc
 
 func (c *RPCClient) AccountDelete(ctx context.Context, accountID string) error {
 	return c.DeleteAccount(ctx, accountID)
+}
+
+func (c *RPCClient) AccountDeleteUnavailableFree(ctx context.Context) (RPCDeleteUnavailableFreeResult, error) {
+	return c.DeleteUnavailableFreeAccounts(ctx)
 }
 
 func (c *RPCClient) AccountLoginStart(ctx context.Context, req RPCLoginStartRequest) (RPCLoginStartResult, error) {

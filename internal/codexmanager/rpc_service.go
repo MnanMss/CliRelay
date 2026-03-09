@@ -37,6 +37,14 @@ func (s *RPCService) DeleteAccount(ctx context.Context, accountID string) error 
 	return client.DeleteAccount(ctx, accountID)
 }
 
+func (s *RPCService) DeleteUnavailableFreeAccounts(ctx context.Context) (RPCDeleteUnavailableFreeResult, error) {
+	client, err := s.requireClient()
+	if err != nil {
+		return RPCDeleteUnavailableFreeResult{}, err
+	}
+	return client.DeleteUnavailableFreeAccounts(ctx)
+}
+
 func (s *RPCService) StartLogin(ctx context.Context, req RPCLoginStartRequest) (RPCLoginStartResult, error) {
 	client, err := s.requireClient()
 	if err != nil {

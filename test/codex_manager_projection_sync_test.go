@@ -97,6 +97,13 @@ func (f *fakeProjectionRPCClient) DeleteAccount(_ context.Context, _ string) err
 	return nil
 }
 
+func (f *fakeProjectionRPCClient) DeleteUnavailableFreeAccounts(_ context.Context) (codexmanager.RPCDeleteUnavailableFreeResult, error) {
+	f.mu.Lock()
+	f.writeCalls++
+	f.mu.Unlock()
+	return codexmanager.RPCDeleteUnavailableFreeResult{}, nil
+}
+
 func (f *fakeProjectionRPCClient) StartLogin(_ context.Context, _ codexmanager.RPCLoginStartRequest) (codexmanager.RPCLoginStartResult, error) {
 	f.mu.Lock()
 	f.writeCalls++
