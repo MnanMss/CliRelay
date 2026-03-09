@@ -38,6 +38,11 @@ remote-management:
 # Authentication directory (supports ~ for home directory)
 auth-dir: "~/.cli-proxy-api"
 
+codex-manager:
+  enabled: true
+  endpoint: ""
+  request-timeout-seconds: 20
+
 # API keys for authentication
 api-keys:
   - "your-api-key-1"
