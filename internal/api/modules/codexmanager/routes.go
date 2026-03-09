@@ -28,11 +28,13 @@ func (m *Module) RegisterManagementRoutes(group *gin.RouterGroup) {
 	{
 		routes.GET("/accounts", m.handler.ListAccounts)
 		routes.GET("/usage", m.handler.ListUsage)
+		routes.GET("/export", m.handler.ExportAccounts)
 		routes.GET("/accounts/:accountId", m.handler.GetAccount)
 		routes.GET("/accounts/:accountId/usage", m.handler.GetAccountUsage)
 		routes.DELETE("/accounts/:accountId", m.handler.DeleteAccount)
 		routes.PATCH("/accounts/:accountId/relay-state", m.handler.PatchRelayState)
 		routes.POST("/accounts/:accountId/usage/refresh", m.handler.RefreshAccountUsage)
+		routes.POST("/accounts/free/delete-unavailable", m.handler.DeleteUnavailableFreeAccounts)
 		routes.POST("/usage/refresh-batch", m.handler.RefreshUsageBatch)
 
 		routes.POST("/import", m.handler.ImportAccounts)

@@ -39,6 +39,18 @@ func TestCodexManagerRoutesFeatureFlag(t *testing.T) {
 		if actionResp.StatusCode == http.StatusNotFound {
 			t.Fatalf("expected enabled codex-manager login/start route to be registered, got 404: %s", actionBody)
 		}
+
+		exportResp := doManagementGET(t, client, baseURL+codexmanager.ManagementNamespace+"/export", true)
+		exportBody := readAndCloseResponseBodyBytes(t, exportResp)
+		if exportResp.StatusCode != http.StatusOK {
+			t.Fatalf("expected enabled codex-manager export route status %d, got %d: %s", http.StatusOK, exportResp.StatusCode, string(exportBody))
+		}
+		if disposition := exportResp.Header.Get("Content-Disposition"); !strings.Contains(disposition, "attachment;") || !strings.Contains(disposition, ".zip") {
+			t.Fatalf("expected export content disposition attachment zip, got %q", disposition)
+		}
+		if len(exportBody) == 0 {
+			t.Fatal("expected export route to return zip payload bytes")
+		}
 	})
 
 	t.Run("disabled_route_is_hidden_but_legacy_management_route_still_works", func(t *testing.T) {
