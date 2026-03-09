@@ -148,6 +148,64 @@ func TestCodexManagerWriteThroughActions(t *testing.T) {
 		AssertParamString(t, deleteParams, "accountId", seedAccountAlpha)
 	})
 
+	t.Run("import_falls_back_to_local_state_when_upstream_rejects", func(t *testing.T) {
+		stub.ResetCalls()
+		stub.SetMethodHook("account/import", func(req RPCRequestCapture) (any, error) {
+			return nil, errors.New("codex-manager upstream rejected request (HTTP 404)")
+		})
+
+		router, stateDir := newCodexManagerActionRouterWithStateDir(t, stub)
+		statusCode, payload, raw := performCodexActionJSONRequest(
+			t,
+			router,
+			http.MethodPost,
+			codexmanager.ManagementNamespace+"/import",
+			`{"content":"{\"accountId\":\"acc-fallback\",\"accessToken\":\"fallback-token\",\"refreshToken\":\"fallback-refresh\",\"email\":\"fallback@example.com\"}"}`,
+		)
+		if statusCode != http.StatusOK {
+			t.Fatalf("expected fallback import status %d, got %d: %s", http.StatusOK, statusCode, raw)
+		}
+		assertBoolField(t, payload, "ok", true)
+		data := requireObjectField(t, payload, "data")
+		assertNumberField(t, data, "total", 1)
+		assertNumberField(t, data, "created", 1)
+		assertNumberField(t, data, "updated", 0)
+		assertNumberField(t, data, "failed", 0)
+
+		store, err := codexmanager.NewCredentialStoreForStateDir(stateDir)
+		if err != nil {
+			t.Fatalf("create credential store: %v", err)
+		}
+		record, exists := store.Get("acc-fallback")
+		if !exists {
+			t.Fatal("expected fallback import to persist local credential")
+		}
+		if record.AccessToken != "fallback-token" || record.RefreshToken != "fallback-refresh" {
+			t.Fatalf("expected fallback credential tokens to persist, got %#v", record)
+		}
+
+		runtimeAuths, err := codexmanager.LoadProjectedRuntimeCodexAuths(stateDir)
+		if err != nil {
+			t.Fatalf("load projected runtime auths: %v", err)
+		}
+		foundRuntime := false
+		for i := range runtimeAuths {
+			if runtimeAuths[i].ID == "cm:acc-fallback" {
+				foundRuntime = true
+				break
+			}
+		}
+		if !foundRuntime {
+			t.Fatal("expected fallback import to project a runtime auth for clirelay")
+		}
+
+		importedAccount := readAccountFromListByID(t, router, "acc-fallback")
+		assertStringField(t, importedAccount, "accountId", "acc-fallback")
+		assertStringField(t, importedAccount, "label", "fallback@example.com")
+
+		findCallByMethod(t, stub.GetCalls(), "account/import", 1)
+	})
+
 	t.Run("login_status_flow_covers_terminal_states", func(t *testing.T) {
 		cases := []struct {
 			loginID        string

@@ -299,31 +299,61 @@ func (h *Handler) ImportAccounts(c *gin.Context) {
 		return
 	}
 
-	result, err := h.service.ImportAccounts(c.Request.Context(), contents)
+	data, err := h.importAccountsWithFallback(c.Request.Context(), contents, time.Now().UTC())
 	if err != nil {
 		h.writeError(c, err)
 		return
 	}
 
-	importedAt := time.Now().UTC()
-	if err := h.syncImportedExecutableCredentials(contents, importedAt); err != nil {
-		h.writeError(c, err)
-		return
-	}
-	if err := h.syncImportedProjectionAccounts(contents, importedAt); err != nil {
-		h.writeError(c, err)
-		return
+	c.JSON(http.StatusOK, Success(data))
+}
+
+func (h *Handler) importAccountsWithFallback(ctx context.Context, contents []string, importedAt time.Time) (ImportActionData, error) {
+	result, err := h.service.ImportAccounts(ctx, contents)
+	if err != nil {
+		if !shouldFallbackToLocalImport(err) {
+			return ImportActionData{}, err
+		}
+		log.WithError(err).Warn("codex-manager upstream import unavailable, falling back to local state import")
+		return h.importAccountsLocally(contents, importedAt)
 	}
 
-	data := ImportActionData{
+	if err := h.syncImportedExecutableCredentials(contents, importedAt); err != nil {
+		return ImportActionData{}, err
+	}
+	if err := h.syncImportedProjectionAccounts(contents, importedAt); err != nil {
+		return ImportActionData{}, err
+	}
+
+	return ImportActionData{
 		Total:   result.Total,
 		Created: result.Created,
 		Updated: result.Updated,
 		Failed:  result.Failed,
 		Errors:  importActionErrorsFromRPC(result.Errors),
+	}, nil
+}
+
+func (h *Handler) importAccountsLocally(contents []string, importedAt time.Time) (ImportActionData, error) {
+	records := ParseCredentialRecords(contents)
+	if len(records) == 0 {
+		return ImportActionData{}, NewCodedError(http.StatusInternalServerError, CodeInternalError, "codex-manager import succeeded but import contents produced no executable local credentials", false)
 	}
 
-	c.JSON(http.StatusOK, Success(data))
+	store, err := NewCredentialStoreForStateDir(h.stateDir)
+	if err != nil {
+		return ImportActionData{}, NewCodedError(http.StatusInternalServerError, CodeInternalError, "codex-manager local credential store is not initialized", false)
+	}
+
+	data := summarizeLocalImportResult(store, records, importedAt)
+	if err := h.syncImportedExecutableCredentials(contents, importedAt); err != nil {
+		return ImportActionData{}, err
+	}
+	if err := h.syncImportedProjectionAccounts(contents, importedAt); err != nil {
+		return ImportActionData{}, err
+	}
+
+	return data, nil
 }
 
 func (h *Handler) ExportAccounts(c *gin.Context) {
@@ -999,6 +1029,56 @@ func importActionErrorsFromRPC(errors []RPCAccountImportError) []ImportActionErr
 		})
 	}
 	return data
+}
+
+func summarizeLocalImportResult(store *CredentialStore, records []CredentialRecord, importedAt time.Time) ImportActionData {
+	now := importedAt.UTC()
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+
+	var created int64
+	var updated int64
+	for i := range records {
+		normalized := normalizeCredentialRecord(records[i], now)
+		if normalized.AccountID == "" || !credentialHasExecutableSecret(normalized) {
+			continue
+		}
+		existing, exists := store.Get(normalized.AccountID)
+		if !exists {
+			created++
+			continue
+		}
+		if !credentialRecordEquals(existing, normalized) {
+			updated++
+		}
+	}
+
+	return ImportActionData{
+		Total:   int64(len(records)),
+		Created: created,
+		Updated: updated,
+		Failed:  0,
+		Errors:  []ImportActionErrorData{},
+	}
+}
+
+func shouldFallbackToLocalImport(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, ErrUpstreamUnavailable) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+
+	var codedErr *CodedError
+	if errors.As(err, &codedErr) {
+		switch codedErr.Code {
+		case CodeUpstreamRejected, CodeUpstreamUnavailable, CodeUpstreamTimeout:
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeLoginFlowStatus(raw string) (string, bool) {
