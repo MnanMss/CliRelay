@@ -166,6 +166,103 @@ func TestCodexManagerFailureIsolationFromLocalCodex(t *testing.T) {
 	}
 }
 
+func TestCodexManagerCooldownRuntimeAuthIsSkippedUntilRetryWindowExpires(t *testing.T) {
+	service, runtimeAuthID := newCodexRuntimeTestService(t)
+	service.syncCodexManagerRuntimeAuths(context.Background())
+
+	localAuth := &coreauth.Auth{
+		ID:       "local-codex-auth",
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Label:    "local-codex",
+		Attributes: map[string]string{
+			"api_key": "local-test-api-key",
+		},
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}
+	service.applyCoreAuthAddOrUpdate(context.Background(), localAuth)
+
+	service.coreManager.RegisterExecutor(&codexRuntimeTestExecutor{
+		failByAuthID: map[string]error{
+			runtimeAuthID: codexRuntimeStatusError{code: http.StatusTooManyRequests, msg: "cm-runtime-cooldown"},
+		},
+	})
+
+	_, err := service.coreManager.Execute(
+		context.Background(),
+		[]string{"codex"},
+		cliproxyexecutor.Request{},
+		cliproxyexecutor.Options{
+			Metadata: map[string]any{
+				cliproxyexecutor.PinnedAuthMetadataKey: runtimeAuthID,
+			},
+		},
+	)
+	if err == nil {
+		t.Fatal("expected pinned cooldown execution to fail")
+	}
+
+	cmAuth, ok := service.coreManager.GetByID(runtimeAuthID)
+	if !ok || cmAuth == nil {
+		t.Fatalf("expected runtime auth %q to remain registered", runtimeAuthID)
+	}
+	if !cmAuth.Unavailable {
+		t.Fatal("expected runtime auth to be unavailable after cooldown failure")
+	}
+	if cmAuth.NextRetryAfter.IsZero() || !cmAuth.NextRetryAfter.After(time.Now()) {
+		t.Fatalf("expected runtime auth cooldown retry window in the future, got %v", cmAuth.NextRetryAfter)
+	}
+
+	service.coreManager.RegisterExecutor(&codexRuntimeTestExecutor{})
+
+	selectedAuthID := ""
+	_, err = service.coreManager.Execute(
+		context.Background(),
+		[]string{"codex"},
+		cliproxyexecutor.Request{},
+		cliproxyexecutor.Options{
+			Metadata: map[string]any{
+				cliproxyexecutor.SelectedAuthCallbackMetadataKey: func(authID string) {
+					selectedAuthID = authID
+				},
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("expected non-pinned execution to fall back during cooldown, got %v", err)
+	}
+	if selectedAuthID != localAuth.ID {
+		t.Fatalf("expected cooldown runtime auth to be skipped in favor of %q, got %q", localAuth.ID, selectedAuthID)
+	}
+
+	service.applyCoreAuthRemoval(context.Background(), localAuth.ID)
+	cmRecovered := cmAuth.Clone()
+	cmRecovered.NextRetryAfter = time.Now().Add(-1 * time.Second)
+	service.applyCoreAuthAddOrUpdate(context.Background(), cmRecovered)
+	service.coreManager.RegisterExecutor(&codexRuntimeTestExecutor{})
+
+	selectedAuthID = ""
+	_, err = service.coreManager.Execute(
+		context.Background(),
+		[]string{"codex"},
+		cliproxyexecutor.Request{},
+		cliproxyexecutor.Options{
+			Metadata: map[string]any{
+				cliproxyexecutor.SelectedAuthCallbackMetadataKey: func(authID string) {
+					selectedAuthID = authID
+				},
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("expected cooldown-expired runtime auth to become selectable again, got %v", err)
+	}
+	if selectedAuthID != runtimeAuthID {
+		t.Fatalf("expected runtime auth %q after cooldown expiry, got %q", runtimeAuthID, selectedAuthID)
+	}
+}
+
 func newCodexRuntimeTestService(t *testing.T) (*Service, string) {
 	t.Helper()
 
