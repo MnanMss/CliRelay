@@ -5,14 +5,19 @@ package cliproxy
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/codexmanager"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
@@ -89,7 +94,13 @@ type Service struct {
 
 	// wsGateway manages websocket Gemini providers.
 	wsGateway *wsrelay.Manager
+
+	codexRuntimeMu           sync.Mutex
+	codexRuntimeFingerprints map[string]string
+	codexRuntimeCancel       context.CancelFunc
 }
+
+const codexManagerRuntimeSyncInterval = 3 * time.Second
 
 // RegisterUsagePlugin registers a usage plugin on the global usage manager.
 // This allows external code to monitor API usage and token consumption.
@@ -329,6 +340,179 @@ func (s *Service) applyCoreAuthRemoval(ctx context.Context, id string) {
 			s.ensureExecutorsForAuth(existing)
 		}
 	}
+}
+
+func (s *Service) startCodexManagerRuntimeSync(parent context.Context) {
+	if s == nil {
+		return
+	}
+	if parent == nil {
+		parent = context.Background()
+	}
+	s.stopCodexManagerRuntimeSync()
+
+	runtimeCtx, cancel := context.WithCancel(parent)
+	s.codexRuntimeMu.Lock()
+	s.codexRuntimeCancel = cancel
+	s.codexRuntimeMu.Unlock()
+
+	s.syncCodexManagerRuntimeAuths(runtimeCtx)
+	go func() {
+		ticker := time.NewTicker(codexManagerRuntimeSyncInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-runtimeCtx.Done():
+				return
+			case <-ticker.C:
+				s.syncCodexManagerRuntimeAuths(runtimeCtx)
+			}
+		}
+	}()
+}
+
+func (s *Service) stopCodexManagerRuntimeSync() {
+	if s == nil {
+		return
+	}
+	var cancel context.CancelFunc
+	s.codexRuntimeMu.Lock()
+	cancel = s.codexRuntimeCancel
+	s.codexRuntimeCancel = nil
+	s.codexRuntimeMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (s *Service) syncCodexManagerRuntimeAuths(ctx context.Context) {
+	if s == nil || s.coreManager == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	s.cfgMu.RLock()
+	cfg := s.cfg
+	s.cfgMu.RUnlock()
+
+	if cfg == nil || !cfg.CodexManager.Enabled {
+		s.removeAllCodexManagerRuntimeAuths(ctx)
+		return
+	}
+
+	runtimeAuths, err := codexmanager.LoadProjectedRuntimeCodexAuths(codexmanager.ProjectionStateDir(cfg))
+	if err != nil {
+		log.WithError(err).Warn("codex-manager runtime auth sync skipped")
+		return
+	}
+
+	nextAuths := make(map[string]*coreauth.Auth, len(runtimeAuths))
+	nextFingerprints := make(map[string]string, len(runtimeAuths))
+	for i := range runtimeAuths {
+		auth := runtimeAuths[i]
+		if auth == nil || strings.TrimSpace(auth.ID) == "" {
+			continue
+		}
+		clone := auth.Clone()
+		nextAuths[clone.ID] = clone
+		nextFingerprints[clone.ID] = codexRuntimeFingerprint(clone)
+	}
+
+	updates := make([]watcher.AuthUpdate, 0, len(nextFingerprints))
+	deletions := make([]string, 0)
+
+	s.codexRuntimeMu.Lock()
+	if s.codexRuntimeFingerprints == nil {
+		s.codexRuntimeFingerprints = make(map[string]string)
+	}
+	for id, fingerprint := range nextFingerprints {
+		if previous, exists := s.codexRuntimeFingerprints[id]; !exists {
+			updates = append(updates, watcher.AuthUpdate{Action: watcher.AuthUpdateActionAdd, ID: id, Auth: nextAuths[id].Clone()})
+		} else if previous != fingerprint {
+			updates = append(updates, watcher.AuthUpdate{Action: watcher.AuthUpdateActionModify, ID: id, Auth: nextAuths[id].Clone()})
+		}
+	}
+	for id := range s.codexRuntimeFingerprints {
+		if _, exists := nextFingerprints[id]; !exists {
+			deletions = append(deletions, id)
+		}
+	}
+	s.codexRuntimeFingerprints = nextFingerprints
+	s.codexRuntimeMu.Unlock()
+
+	sort.SliceStable(updates, func(i, j int) bool {
+		if updates[i].Action != updates[j].Action {
+			return updates[i].Action < updates[j].Action
+		}
+		return updates[i].ID < updates[j].ID
+	})
+	for i := range updates {
+		s.emitAuthUpdate(ctx, updates[i])
+	}
+
+	if len(deletions) == 0 {
+		return
+	}
+	sort.Strings(deletions)
+	for _, id := range deletions {
+		s.emitAuthUpdate(ctx, watcher.AuthUpdate{Action: watcher.AuthUpdateActionDelete, ID: id})
+	}
+}
+
+func (s *Service) removeAllCodexManagerRuntimeAuths(ctx context.Context) {
+	if s == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	ids := make([]string, 0)
+	s.codexRuntimeMu.Lock()
+	for id := range s.codexRuntimeFingerprints {
+		ids = append(ids, id)
+	}
+	s.codexRuntimeFingerprints = make(map[string]string)
+	s.codexRuntimeMu.Unlock()
+
+	if len(ids) == 0 {
+		return
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		s.emitAuthUpdate(ctx, watcher.AuthUpdate{Action: watcher.AuthUpdateActionDelete, ID: id})
+	}
+}
+
+func codexRuntimeFingerprint(auth *coreauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	payload := struct {
+		ID         string            `json:"id"`
+		Provider   string            `json:"provider"`
+		Label      string            `json:"label"`
+		Prefix     string            `json:"prefix"`
+		ProxyURL   string            `json:"proxy_url"`
+		Attributes map[string]string `json:"attributes,omitempty"`
+		Metadata   map[string]any    `json:"metadata,omitempty"`
+	}{
+		ID:         strings.TrimSpace(auth.ID),
+		Provider:   strings.TrimSpace(auth.Provider),
+		Label:      strings.TrimSpace(auth.Label),
+		Prefix:     strings.TrimSpace(auth.Prefix),
+		ProxyURL:   strings.TrimSpace(auth.ProxyURL),
+		Attributes: auth.Attributes,
+		Metadata:   auth.Metadata,
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return payload.ID
+	}
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:16])
 }
 
 func (s *Service) applyRetryConfig(cfg *config.Config) {
@@ -605,6 +789,7 @@ func (s *Service) Run(ctx context.Context) error {
 			s.coreManager.SetOAuthModelAlias(newCfg.OAuthModelAlias)
 		}
 		s.rebindExecutors()
+		s.syncCodexManagerRuntimeAuths(context.Background())
 	}
 
 	watcherWrapper, err = s.watcherFactory(s.configPath, s.cfg.AuthDir, reloadCallback)
@@ -631,6 +816,8 @@ func (s *Service) Run(ctx context.Context) error {
 		s.coreManager.StartAutoRefresh(context.Background(), interval)
 		log.Infof("core auth auto-refresh started (interval=%s)", interval)
 	}
+
+	s.startCodexManagerRuntimeSync(ctx)
 
 	select {
 	case <-ctx.Done():
@@ -665,6 +852,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		if s.watcherCancel != nil {
 			s.watcherCancel()
 		}
+		s.stopCodexManagerRuntimeSync()
 		if s.coreManager != nil {
 			s.coreManager.StopAutoRefresh()
 		}

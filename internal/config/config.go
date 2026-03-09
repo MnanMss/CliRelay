@@ -107,6 +107,8 @@ type Config struct {
 	// AmpCode contains Amp CLI upstream configuration, management restrictions, and model mappings.
 	AmpCode AmpCode `yaml:"ampcode" json:"ampcode"`
 
+	CodexManager CodexManagerConfig `yaml:"codex-manager" json:"codex-manager"`
+
 	// OAuthExcludedModels defines per-provider global model exclusions applied to OAuth/file-backed auth entries.
 	OAuthExcludedModels map[string][]string `yaml:"oauth-excluded-models,omitempty" json:"oauth-excluded-models,omitempty"`
 
@@ -254,6 +256,14 @@ type AmpUpstreamAPIKeyEntry struct {
 
 	// APIKeys are the client API keys (from top-level api-keys) that map to this upstream key.
 	APIKeys []string `yaml:"api-keys" json:"api-keys"`
+}
+
+type CodexManagerConfig struct {
+	Enabled bool `yaml:"enabled" json:"enabled"`
+
+	Endpoint string `yaml:"endpoint,omitempty" json:"endpoint,omitempty"`
+
+	RequestTimeoutSeconds int `yaml:"request-timeout-seconds,omitempty" json:"request-timeout-seconds,omitempty"`
 }
 
 // PayloadConfig defines default and override parameter rules applied to provider payloads.
@@ -637,6 +647,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// Sanitize Codex keys: drop entries without base-url
 	cfg.SanitizeCodexKeys()
+	cfg.SanitizeCodexManager()
 
 	// Sanitize Claude key headers
 	cfg.SanitizeClaudeKeys()
@@ -807,6 +818,17 @@ func (cfg *Config) SanitizeCodexKeys() {
 		out = append(out, e)
 	}
 	cfg.CodexKey = out
+}
+
+func (cfg *Config) SanitizeCodexManager() {
+	if cfg == nil {
+		return
+	}
+
+	cfg.CodexManager.Endpoint = strings.TrimSpace(cfg.CodexManager.Endpoint)
+	if cfg.CodexManager.RequestTimeoutSeconds < 0 {
+		cfg.CodexManager.RequestTimeoutSeconds = 0
+	}
 }
 
 // SanitizeClaudeKeys normalizes headers for Claude credentials.
