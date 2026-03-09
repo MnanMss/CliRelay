@@ -70,10 +70,14 @@ func (s *ConfigSynthesizer) synthesizeGeminiKeys(ctx *SynthesisContext) []*corea
 			attrs["models_hash"] = hash
 		}
 		addConfigHeadersToAttrs(entry.Headers, attrs)
+		label := strings.TrimSpace(entry.Name)
+		if label == "" {
+			label = "gemini-apikey"
+		}
 		a := &coreauth.Auth{
 			ID:         id,
 			Provider:   "gemini",
-			Label:      "gemini-apikey",
+			Label:      label,
 			Prefix:     prefix,
 			Status:     coreauth.StatusActive,
 			ProxyURL:   proxyURL,
@@ -118,10 +122,14 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 		}
 		addConfigHeadersToAttrs(ck.Headers, attrs)
 		proxyURL := strings.TrimSpace(ck.ProxyURL)
+		label := strings.TrimSpace(ck.Name)
+		if label == "" {
+			label = "claude-apikey"
+		}
 		a := &coreauth.Auth{
 			ID:         id,
 			Provider:   "claude",
-			Label:      "claude-apikey",
+			Label:      label,
 			Prefix:     prefix,
 			Status:     coreauth.StatusActive,
 			ProxyURL:   proxyURL,
@@ -168,10 +176,14 @@ func (s *ConfigSynthesizer) synthesizeCodexKeys(ctx *SynthesisContext) []*coreau
 		}
 		addConfigHeadersToAttrs(ck.Headers, attrs)
 		proxyURL := strings.TrimSpace(ck.ProxyURL)
+		label := strings.TrimSpace(ck.Name)
+		if label == "" {
+			label = "codex-apikey"
+		}
 		a := &coreauth.Auth{
 			ID:         id,
 			Provider:   "codex",
-			Label:      "codex-apikey",
+			Label:      label,
 			Prefix:     prefix,
 			Status:     coreauth.StatusActive,
 			ProxyURL:   proxyURL,
