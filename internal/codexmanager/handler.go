@@ -309,6 +309,11 @@ func (h *Handler) ImportAccounts(c *gin.Context) {
 }
 
 func (h *Handler) importAccountsWithFallback(ctx context.Context, contents []string, importedAt time.Time) (ImportActionData, error) {
+	if h == nil || h.service == nil {
+		log.Warn("codex-manager upstream import endpoint is not configured, falling back to local state import")
+		return h.importAccountsLocally(contents, importedAt)
+	}
+
 	result, err := h.service.ImportAccounts(ctx, contents)
 	if err != nil {
 		if !shouldFallbackToLocalImport(err) {

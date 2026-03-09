@@ -206,6 +206,51 @@ func TestCodexManagerWriteThroughActions(t *testing.T) {
 		findCallByMethod(t, stub.GetCalls(), "account/import", 1)
 	})
 
+	t.Run("import_falls_back_to_local_state_without_upstream_endpoint", func(t *testing.T) {
+		router, stateDir := newCodexManagerActionRouterWithoutUpstream(t)
+		statusCode, payload, raw := performCodexActionJSONRequest(
+			t,
+			router,
+			http.MethodPost,
+			codexmanager.ManagementNamespace+"/import",
+			`{"content":"{\"accountId\":\"acc-local-only\",\"accessToken\":\"local-token\",\"refreshToken\":\"local-refresh\",\"email\":\"local@example.com\"}"}`,
+		)
+		if statusCode != http.StatusOK {
+			t.Fatalf("expected local-only import status %d, got %d: %s", http.StatusOK, statusCode, raw)
+		}
+		assertBoolField(t, payload, "ok", true)
+		data := requireObjectField(t, payload, "data")
+		assertNumberField(t, data, "total", 1)
+		assertNumberField(t, data, "created", 1)
+		assertNumberField(t, data, "updated", 0)
+		assertNumberField(t, data, "failed", 0)
+
+		store, err := codexmanager.NewCredentialStoreForStateDir(stateDir)
+		if err != nil {
+			t.Fatalf("create credential store: %v", err)
+		}
+		if record, exists := store.Get("acc-local-only"); !exists {
+			t.Fatal("expected local-only import to persist local credential")
+		} else if record.AccessToken != "local-token" || record.RefreshToken != "local-refresh" {
+			t.Fatalf("expected local-only credential tokens to persist, got %#v", record)
+		}
+
+		runtimeAuths, err := codexmanager.LoadProjectedRuntimeCodexAuths(stateDir)
+		if err != nil {
+			t.Fatalf("load projected runtime auths: %v", err)
+		}
+		foundRuntime := false
+		for i := range runtimeAuths {
+			if runtimeAuths[i].ID == "cm:acc-local-only" {
+				foundRuntime = true
+				break
+			}
+		}
+		if !foundRuntime {
+			t.Fatal("expected local-only import to project a runtime auth for clirelay")
+		}
+	})
+
 	t.Run("login_status_flow_covers_terminal_states", func(t *testing.T) {
 		cases := []struct {
 			loginID        string
@@ -812,9 +857,11 @@ func newCodexManagerActionRouterWithStateDir(t *testing.T, stub *RPCStubServer) 
 		AuthDir: t.TempDir(),
 		CodexManager: config.CodexManagerConfig{
 			Enabled:               true,
-			Endpoint:              stub.URL(),
 			RequestTimeoutSeconds: 1,
 		},
+	}
+	if stub != nil {
+		cfg.CodexManager.Endpoint = stub.URL()
 	}
 	seedCodexManagerProjectionState(t, cfg)
 	stateDir := codexmanager.ProjectionStateDir(cfg)
@@ -838,6 +885,10 @@ func newCodexManagerActionRouterWithStateDir(t *testing.T, stub *RPCStubServer) 
 	routes.POST("/usage/refresh-batch", handler.RefreshUsageBatch)
 
 	return router, stateDir
+}
+
+func newCodexManagerActionRouterWithoutUpstream(t *testing.T) (*gin.Engine, string) {
+	return newCodexManagerActionRouterWithStateDir(t, nil)
 }
 
 func seedCodexManagerCredentials(t *testing.T, stateDir string, records []codexmanager.CredentialRecord) {
