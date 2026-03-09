@@ -84,3 +84,15 @@ type DeleteActionData struct {
 	AlreadyRemoved     bool   `json:"alreadyRemoved"`
 	NotFoundButHandled bool   `json:"notFoundButHandled"`
 }
+
+type DeleteUnavailableFreeActionData struct {
+	Scanned                    int64    `json:"scanned"`
+	Deleted                    int64    `json:"deleted"`
+	SkippedAvailable           int64    `json:"skippedAvailable"`
+	SkippedNonFree             int64    `json:"skippedNonFree"`
+	SkippedMissingUsage        int64    `json:"skippedMissingUsage"`
+	SkippedMissingToken        int64    `json:"skippedMissingToken"`
+	DeletedAccountIDs          []string `json:"deletedAccountIds"`
+	LocalCredentialsRemoved    int64    `json:"localCredentialsRemoved"`
+	LocalProjectionsTombstoned int64    `json:"localProjectionsTombstoned"`
+}

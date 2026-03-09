@@ -1,12 +1,16 @@
 package test
 
 import (
+	"archive/zip"
+	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/codexmanager"
@@ -549,6 +553,195 @@ func TestCodexManagerImportClosesRuntimeAuthLoop(t *testing.T) {
 	}
 }
 
+func TestCodexManagerExportAccountsReturnsBrowserDownloadZip(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	stub := NewRPCStubServer(t)
+	defer stub.Close()
+
+	router, stateDir := newCodexManagerActionRouterWithStateDir(t, stub)
+	seedCodexManagerCredentials(t, stateDir, []codexmanager.CredentialRecord{
+		{
+			AccountID:        seedAccountAlpha,
+			AccessToken:      "alpha-export-token",
+			RefreshToken:     "alpha-export-refresh",
+			IDToken:          "alpha-export-id",
+			Email:            "alpha-export@example.com",
+			WorkspaceID:      "ws-alpha",
+			ChatGPTAccountID: "chatgpt-alpha",
+		},
+		{
+			AccountID: seedAccountBravo,
+			APIKey:    "bravo-api-key",
+			BaseURL:   "https://chatgpt.com/backend-api/codex",
+			ProxyURL:  "https://proxy.example.com",
+			Prefix:    "team-bravo",
+		},
+	})
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, codexmanager.ManagementNamespace+"/export", nil)
+	router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected export status %d, got %d: %s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	if contentType := recorder.Header().Get("Content-Type"); !strings.Contains(contentType, "application/zip") {
+		t.Fatalf("expected application/zip content type, got %q", contentType)
+	}
+	if disposition := recorder.Header().Get("Content-Disposition"); !strings.Contains(disposition, "attachment;") || !strings.Contains(disposition, ".zip") {
+		t.Fatalf("expected attachment zip content disposition, got %q", disposition)
+	}
+
+	zipReader, err := zip.NewReader(bytes.NewReader(recorder.Body.Bytes()), int64(recorder.Body.Len()))
+	if err != nil {
+		t.Fatalf("read export zip: %v", err)
+	}
+	if len(zipReader.File) != 2 {
+		t.Fatalf("expected 2 export files, got %d", len(zipReader.File))
+	}
+
+	exportedContents := make([]string, 0, len(zipReader.File))
+	seenLegacyShape := false
+	for i := range zipReader.File {
+		file := zipReader.File[i]
+		if !strings.HasSuffix(file.Name, ".json") {
+			t.Fatalf("expected export file to be json, got %q", file.Name)
+		}
+		rc, err := file.Open()
+		if err != nil {
+			t.Fatalf("open export file %q: %v", file.Name, err)
+		}
+		raw, err := io.ReadAll(rc)
+		_ = rc.Close()
+		if err != nil {
+			t.Fatalf("read export file %q: %v", file.Name, err)
+		}
+		exportedContents = append(exportedContents, string(raw))
+
+		var payload map[string]any
+		if err := json.Unmarshal(raw, &payload); err != nil {
+			t.Fatalf("decode export json %q: %v", file.Name, err)
+		}
+		if _, ok := payload["tokens"].(map[string]any); !ok {
+			t.Fatalf("expected export payload %q to include tokens object", file.Name)
+		}
+		meta, ok := payload["meta"].(map[string]any)
+		if !ok {
+			t.Fatalf("expected export payload %q to include meta object", file.Name)
+		}
+		if _, hasLabel := meta["label"]; hasLabel {
+			seenLegacyShape = true
+		}
+	}
+	if !seenLegacyShape {
+		t.Fatal("expected at least one export entry to include legacy meta payload fields")
+	}
+
+	records := codexmanager.ParseCredentialRecords(exportedContents)
+	if len(records) != 2 {
+		t.Fatalf("expected 2 credential records from exported zip, got %d", len(records))
+	}
+	recordByAccount := make(map[string]codexmanager.CredentialRecord, len(records))
+	for i := range records {
+		recordByAccount[records[i].AccountID] = records[i]
+	}
+	alpha, ok := recordByAccount[seedAccountAlpha]
+	if !ok {
+		t.Fatalf("expected exported alpha credential record")
+	}
+	if alpha.AccessToken != "alpha-export-token" || alpha.RefreshToken != "alpha-export-refresh" || alpha.IDToken != "alpha-export-id" {
+		t.Fatalf("expected alpha oauth tokens to round-trip, got %#v", alpha)
+	}
+	if alpha.WorkspaceID != "ws-alpha" || alpha.ChatGPTAccountID != "chatgpt-alpha" || alpha.Email != "alpha-export@example.com" {
+		t.Fatalf("expected alpha meta fields to round-trip, got %#v", alpha)
+	}
+	bravo, ok := recordByAccount[seedAccountBravo]
+	if !ok {
+		t.Fatalf("expected exported bravo credential record")
+	}
+	if bravo.APIKey != "bravo-api-key" || bravo.BaseURL != "https://chatgpt.com/backend-api/codex" {
+		t.Fatalf("expected bravo api-key fields to round-trip, got %#v", bravo)
+	}
+	if bravo.ProxyURL != "https://proxy.example.com" || bravo.Prefix != "team-bravo" {
+		t.Fatalf("expected bravo relay fields to round-trip, got %#v", bravo)
+	}
+	if calls := stub.GetCalls(); len(calls) != 0 {
+		t.Fatalf("expected export to avoid upstream rpc calls, got %d call(s)", len(calls))
+	}
+}
+
+func TestCodexManagerDeleteUnavailableFreeAccountsCleansLocalState(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	stub := NewRPCStubServer(t)
+	defer stub.Close()
+
+	stub.SetMethodHook("account/deleteUnavailableFree", func(req RPCRequestCapture) (any, error) {
+		return map[string]any{
+			"scanned":             3,
+			"deleted":             1,
+			"skippedAvailable":    1,
+			"skippedNonFree":      1,
+			"skippedMissingUsage": 0,
+			"skippedMissingToken": 0,
+			"deletedAccountIds":   []string{seedAccountAlpha},
+		}, nil
+	})
+
+	router, stateDir := newCodexManagerActionRouterWithStateDir(t, stub)
+	seedCodexManagerCredentials(t, stateDir, []codexmanager.CredentialRecord{
+		{AccountID: seedAccountAlpha, AccessToken: "alpha-token", RefreshToken: "alpha-refresh", Email: "alpha@example.com"},
+		{AccountID: seedAccountBravo, AccessToken: "bravo-token", RefreshToken: "bravo-refresh", Email: "bravo@example.com"},
+	})
+
+	statusCode, payload, raw := performCodexActionJSONRequest(
+		t,
+		router,
+		http.MethodPost,
+		codexmanager.ManagementNamespace+"/accounts/free/delete-unavailable",
+		"",
+	)
+	if statusCode != http.StatusOK {
+		t.Fatalf("expected delete-unavailable status %d, got %d: %s", http.StatusOK, statusCode, raw)
+	}
+	assertBoolField(t, payload, "ok", true)
+	data := requireObjectField(t, payload, "data")
+	assertNumberField(t, data, "scanned", 3)
+	assertNumberField(t, data, "deleted", 1)
+	assertNumberField(t, data, "skippedAvailable", 1)
+	assertNumberField(t, data, "skippedNonFree", 1)
+	assertNumberField(t, data, "localCredentialsRemoved", 1)
+	assertNumberField(t, data, "localProjectionsTombstoned", 1)
+	deletedIDs := requireArrayField(t, data, "deletedAccountIds")
+	if len(deletedIDs) != 1 || deletedIDs[0] != seedAccountAlpha {
+		t.Fatalf("expected deletedAccountIds [%q], got %#v", seedAccountAlpha, deletedIDs)
+	}
+
+	store, err := codexmanager.NewCredentialStoreForStateDir(stateDir)
+	if err != nil {
+		t.Fatalf("create credential store: %v", err)
+	}
+	if _, exists := store.Get(seedAccountAlpha); exists {
+		t.Fatalf("expected local credential %q to be removed", seedAccountAlpha)
+	}
+	if _, exists := store.Get(seedAccountBravo); !exists {
+		t.Fatalf("expected local credential %q to remain", seedAccountBravo)
+	}
+
+	alphaAccount := readAccountFromListByID(t, router, seedAccountAlpha)
+	assertBoolField(t, alphaAccount, "stale", true)
+	assertBoolField(t, alphaAccount, "runtimeIncluded", false)
+
+	bravoAccount := readAccountFromListByID(t, router, seedAccountBravo)
+	assertBoolField(t, bravoAccount, "stale", false)
+
+	deleteUnavailableCall := findCallByMethod(t, stub.GetCalls(), "account/deleteUnavailableFree", 1)
+	if len(deleteUnavailableCall.Params) != 0 && string(deleteUnavailableCall.Params) != "null" {
+		t.Fatalf("expected deleteUnavailableFree params to be empty or null, got %s", string(deleteUnavailableCall.Params))
+	}
+}
+
 func newCodexManagerActionRouter(t *testing.T, stub *RPCStubServer) *gin.Engine {
 	router, _ := newCodexManagerActionRouterWithStateDir(t, stub)
 	return router
@@ -573,6 +766,7 @@ func newCodexManagerActionRouterWithStateDir(t *testing.T, stub *RPCStubServer) 
 	routes := router.Group(codexmanager.ManagementNamespace)
 	routes.GET("/accounts", handler.ListAccounts)
 	routes.GET("/usage", handler.ListUsage)
+	routes.GET("/export", handler.ExportAccounts)
 	routes.GET("/accounts/:accountId", handler.GetAccount)
 	routes.GET("/accounts/:accountId/usage", handler.GetAccountUsage)
 	routes.POST("/login/start", handler.StartLogin)
@@ -582,9 +776,22 @@ func newCodexManagerActionRouterWithStateDir(t *testing.T, stub *RPCStubServer) 
 	routes.DELETE("/accounts/:accountId", handler.DeleteAccount)
 	routes.PATCH("/accounts/:accountId/relay-state", handler.PatchRelayState)
 	routes.POST("/accounts/:accountId/usage/refresh", handler.RefreshAccountUsage)
+	routes.POST("/accounts/free/delete-unavailable", handler.DeleteUnavailableFreeAccounts)
 	routes.POST("/usage/refresh-batch", handler.RefreshUsageBatch)
 
 	return router, stateDir
+}
+
+func seedCodexManagerCredentials(t *testing.T, stateDir string, records []codexmanager.CredentialRecord) {
+	t.Helper()
+
+	store, err := codexmanager.NewCredentialStoreForStateDir(stateDir)
+	if err != nil {
+		t.Fatalf("create credential store: %v", err)
+	}
+	if _, err := store.UpsertBatch(records, time.Date(2026, time.March, 9, 12, 0, 0, 0, time.UTC)); err != nil {
+		t.Fatalf("seed credential store: %v", err)
+	}
 }
 
 func performCodexActionJSONRequest(t *testing.T, router http.Handler, method, path, body string) (int, map[string]any, string) {

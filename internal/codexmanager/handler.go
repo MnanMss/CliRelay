@@ -1,8 +1,12 @@
 package codexmanager
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"sort"
@@ -322,6 +326,19 @@ func (h *Handler) ImportAccounts(c *gin.Context) {
 	c.JSON(http.StatusOK, Success(data))
 }
 
+func (h *Handler) ExportAccounts(c *gin.Context) {
+	archive, fileName, err := h.buildExportArchive(time.Now().UTC())
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+
+	c.Header("Content-Type", "application/zip")
+	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", fileName))
+	c.Header("Cache-Control", "no-store")
+	c.Data(http.StatusOK, "application/zip", archive)
+}
+
 func (h *Handler) syncImportedExecutableCredentials(contents []string, updatedAt time.Time) error {
 	syncedCount, err := SyncImportedCredentials(h.stateDir, contents, updatedAt)
 	if err != nil {
@@ -475,6 +492,33 @@ func (h *Handler) DeleteAccount(c *gin.Context) {
 		Removed:            true,
 		AlreadyRemoved:     false,
 		NotFoundButHandled: false,
+	}))
+}
+
+func (h *Handler) DeleteUnavailableFreeAccounts(c *gin.Context) {
+	result, err := h.service.DeleteUnavailableFreeAccounts(c.Request.Context())
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+
+	deletedAccountIDs := normalizeDeletedAccountIDs(result.DeletedAccountIDs)
+	cleanupSummary, err := h.cleanupDeletedUnavailableFreeAccounts(deletedAccountIDs, time.Now().UTC())
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, Success(DeleteUnavailableFreeActionData{
+		Scanned:                    result.Scanned,
+		Deleted:                    result.Deleted,
+		SkippedAvailable:           result.SkippedAvailable,
+		SkippedNonFree:             result.SkippedNonFree,
+		SkippedMissingUsage:        result.SkippedMissingUsage,
+		SkippedMissingToken:        result.SkippedMissingToken,
+		DeletedAccountIDs:          deletedAccountIDs,
+		LocalCredentialsRemoved:    cleanupSummary.CredentialsRemoved,
+		LocalProjectionsTombstoned: cleanupSummary.ProjectionsTombstoned,
 	}))
 }
 
@@ -997,6 +1041,320 @@ func normalizeStringPointer(value *string) *string {
 
 func stringPointer(value string) *string {
 	return normalizeStringPointer(&value)
+}
+
+type deleteUnavailableFreeLocalCleanupSummary struct {
+	CredentialsRemoved    int64
+	ProjectionsTombstoned int64
+}
+
+type exportArchiveAccount struct {
+	AccountID   string
+	Projection  *ProjectionAccount
+	Credential  CredentialRecord
+	DisplayName string
+}
+
+func (h *Handler) buildExportArchive(exportedAt time.Time) ([]byte, string, error) {
+	if h == nil {
+		return nil, "", NewCodedError(http.StatusInternalServerError, CodeInternalError, "codex-manager handler is not initialized", false)
+	}
+
+	store, err := NewCredentialStoreForStateDir(h.stateDir)
+	if err != nil {
+		return nil, "", NewCodedError(http.StatusInternalServerError, CodeInternalError, "codex-manager credential store is not initialized", false)
+	}
+	repository, err := h.currentRepository()
+	if err != nil {
+		return nil, "", err
+	}
+
+	entries := buildExportArchiveAccounts(repository.List(), store.List())
+	buffer := bytes.NewBuffer(nil)
+	archive := zip.NewWriter(buffer)
+	fileNames := make(map[string]int, len(entries))
+	for i := range entries {
+		entry := entries[i]
+		payload := buildExportAccountPayload(entry, exportedAt)
+		encoded, err := json.MarshalIndent(payload, "", "  ")
+		if err != nil {
+			_ = archive.Close()
+			return nil, "", NewCodedError(http.StatusInternalServerError, CodeInternalError, "failed to encode codex-manager export payload", false)
+		}
+		writer, err := archive.Create(buildExportAccountFileName(entry.DisplayName, entry.AccountID, fileNames))
+		if err != nil {
+			_ = archive.Close()
+			return nil, "", NewCodedError(http.StatusInternalServerError, CodeInternalError, "failed to create codex-manager export archive", false)
+		}
+		if _, err := writer.Write(encoded); err != nil {
+			_ = archive.Close()
+			return nil, "", NewCodedError(http.StatusInternalServerError, CodeInternalError, "failed to write codex-manager export archive", false)
+		}
+	}
+	if err := archive.Close(); err != nil {
+		return nil, "", NewCodedError(http.StatusInternalServerError, CodeInternalError, "failed to finalize codex-manager export archive", false)
+	}
+
+	now := exportedAt.UTC()
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	return buffer.Bytes(), fmt.Sprintf("codex-manager-accounts-%s.zip", now.Format("20060102T150405Z")), nil
+}
+
+func buildExportArchiveAccounts(projected []ProjectionAccount, credentials []CredentialRecord) []exportArchiveAccount {
+	if len(credentials) == 0 {
+		return nil
+	}
+	projectionByAccount := make(map[string]ProjectionAccount, len(projected))
+	for i := range projected {
+		projection := normalizeProjectionAccount(projected[i], time.Time{})
+		accountID := normalizeCredentialAccountID(projection.AccountID)
+		if accountID == "" {
+			continue
+		}
+		projectionByAccount[accountID] = projection
+	}
+
+	entries := make([]exportArchiveAccount, 0, len(credentials))
+	for i := range credentials {
+		credential := normalizeCredentialRecord(credentials[i], time.Time{})
+		accountID := normalizeCredentialAccountID(credential.AccountID)
+		if accountID == "" || !credentialHasExecutableSecret(credential) {
+			continue
+		}
+		entry := exportArchiveAccount{
+			AccountID:   accountID,
+			Credential:  credential,
+			DisplayName: exportDisplayName(nil, credential),
+		}
+		if projection, ok := projectionByAccount[accountID]; ok {
+			projectionCopy := projection
+			entry.Projection = &projectionCopy
+			entry.DisplayName = exportDisplayName(&projectionCopy, credential)
+		}
+		entries = append(entries, entry)
+	}
+
+	sort.SliceStable(entries, func(i, j int) bool {
+		leftProjection := entries[i].Projection
+		rightProjection := entries[j].Projection
+		switch {
+		case leftProjection != nil && rightProjection != nil && leftProjection.UpstreamSort != rightProjection.UpstreamSort:
+			return leftProjection.UpstreamSort < rightProjection.UpstreamSort
+		case leftProjection != nil && rightProjection == nil:
+			return true
+		case leftProjection == nil && rightProjection != nil:
+			return false
+		default:
+			return strings.ToLower(entries[i].AccountID) < strings.ToLower(entries[j].AccountID)
+		}
+	})
+	return entries
+}
+
+func buildExportAccountPayload(entry exportArchiveAccount, exportedAt time.Time) ExportAccountPayload {
+	credential := normalizeCredentialRecord(entry.Credential, exportedAt)
+	var projection *ProjectionAccount
+	if entry.Projection != nil {
+		projectionCopy := normalizeProjectionAccount(*entry.Projection, exportedAt)
+		projection = &projectionCopy
+	}
+	now := exportedAt.UTC()
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	return ExportAccountPayload{
+		Tokens: ExportTokensPayload{
+			AccessToken:       credential.AccessToken,
+			IDToken:           credential.IDToken,
+			RefreshToken:      credential.RefreshToken,
+			AccountID:         normalizeCredentialAccountID(credential.AccountID),
+			APIKeyAccessToken: credential.APIKey,
+			LastRefresh:       credential.LastRefresh,
+		},
+		Meta: ExportMetaPayload{
+			Label:            exportDisplayName(projection, credential),
+			Issuer:           exportIssuer(projection),
+			GroupName:        exportGroupName(projection),
+			Status:           exportStatus(projection),
+			WorkspaceID:      stringPointer(credential.WorkspaceID),
+			ChatGPTAccountID: exportChatGPTAccountID(credential),
+			Email:            stringPointer(credential.Email),
+			BaseURL:          stringPointer(credential.BaseURL),
+			ProxyURL:         stringPointer(credential.ProxyURL),
+			Prefix:           stringPointer(credential.Prefix),
+			Headers:          cloneExportHeaders(credential.Headers),
+			ExportedAt:       now.Unix(),
+		},
+	}
+}
+
+func exportDisplayName(projection *ProjectionAccount, credential CredentialRecord) string {
+	if projection != nil {
+		if label := strings.TrimSpace(projection.Label); label != "" {
+			return label
+		}
+	}
+	if email := strings.TrimSpace(credential.Email); email != "" {
+		return email
+	}
+	return normalizeCredentialAccountID(credential.AccountID)
+}
+
+func exportIssuer(_ *ProjectionAccount) string {
+	return "codex"
+}
+
+func exportGroupName(projection *ProjectionAccount) *string {
+	if projection == nil {
+		return nil
+	}
+	return stringPointer(projection.GroupName)
+}
+
+func exportStatus(projection *ProjectionAccount) string {
+	if projection != nil {
+		if status := strings.TrimSpace(projection.UpstreamStatus); status != "" {
+			return status
+		}
+	}
+	return "active"
+}
+
+func exportChatGPTAccountID(credential CredentialRecord) *string {
+	if value := strings.TrimSpace(credential.ChatGPTAccountID); value != "" {
+		return stringPointer(value)
+	}
+	if value := strings.TrimSpace(credential.AccountRef); value != "" {
+		return stringPointer(value)
+	}
+	return nil
+}
+
+func cloneExportHeaders(headers map[string]string) map[string]string {
+	if len(headers) == 0 {
+		return nil
+	}
+	cloned := make(map[string]string, len(headers))
+	for key, value := range normalizeCredentialHeaders(headers) {
+		cloned[key] = value
+	}
+	if len(cloned) == 0 {
+		return nil
+	}
+	return cloned
+}
+
+func buildExportAccountFileName(displayName, accountID string, counter map[string]int) string {
+	labelPart := sanitizeExportFileStem(displayName)
+	idPart := sanitizeExportFileStem(accountID)
+	stem := idPart
+	if labelPart != "" && idPart != "" {
+		stem = labelPart + "_" + idPart
+	} else if labelPart != "" {
+		stem = labelPart
+	}
+	if stem == "" {
+		stem = "account"
+	}
+	sequence := counter[stem]
+	counter[stem] = sequence + 1
+	if sequence > 0 {
+		stem = fmt.Sprintf("%s_%d", stem, sequence)
+	}
+	return stem + ".json"
+}
+
+func sanitizeExportFileStem(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return ""
+	}
+	var builder strings.Builder
+	builder.Grow(len(trimmed))
+	for _, ch := range trimmed {
+		if builder.Len() >= 96 {
+			break
+		}
+		if ch < 32 || strings.ContainsRune(`<>:"/\\|?*`, ch) {
+			builder.WriteByte('_')
+			continue
+		}
+		builder.WriteRune(ch)
+	}
+	out := strings.TrimSpace(strings.Trim(builder.String(), " ."))
+	return out
+}
+
+func normalizeDeletedAccountIDs(accountIDs []string) []string {
+	if len(accountIDs) == 0 {
+		return nil
+	}
+	normalized := make([]string, 0, len(accountIDs))
+	seen := make(map[string]struct{}, len(accountIDs))
+	for i := range accountIDs {
+		accountID := normalizeCredentialAccountID(accountIDs[i])
+		if accountID == "" {
+			continue
+		}
+		if _, exists := seen[accountID]; exists {
+			continue
+		}
+		seen[accountID] = struct{}{}
+		normalized = append(normalized, accountID)
+	}
+	if len(normalized) == 0 {
+		return nil
+	}
+	return normalized
+}
+
+func (h *Handler) cleanupDeletedUnavailableFreeAccounts(accountIDs []string, updatedAt time.Time) (deleteUnavailableFreeLocalCleanupSummary, error) {
+	if len(accountIDs) == 0 {
+		return deleteUnavailableFreeLocalCleanupSummary{}, nil
+	}
+	store, err := NewCredentialStoreForStateDir(h.stateDir)
+	if err != nil {
+		return deleteUnavailableFreeLocalCleanupSummary{}, NewCodedError(http.StatusInternalServerError, CodeInternalError, "codex-manager delete unavailable free local credential cleanup failed", false)
+	}
+	repository, err := h.currentRepository()
+	if err != nil {
+		return deleteUnavailableFreeLocalCleanupSummary{}, NewCodedError(http.StatusInternalServerError, CodeInternalError, "codex-manager delete unavailable free local projection cleanup failed", false)
+	}
+	deletedSet := make(map[string]struct{}, len(accountIDs))
+	for i := range accountIDs {
+		deletedSet[accountIDs[i]] = struct{}{}
+	}
+
+	current := repository.List()
+	next := make([]ProjectionAccount, 0, len(current))
+	for i := range current {
+		accountID := normalizeCredentialAccountID(current[i].AccountID)
+		if _, deleted := deletedSet[accountID]; deleted {
+			continue
+		}
+		next = append(next, current[i])
+	}
+	applySummary, err := repository.ApplySync(next, updatedAt)
+	if err != nil {
+		return deleteUnavailableFreeLocalCleanupSummary{}, NewCodedError(http.StatusInternalServerError, CodeInternalError, "codex-manager delete unavailable free local projection cleanup failed", false)
+	}
+
+	var credentialsRemoved int64
+	for i := range accountIDs {
+		if _, exists := store.Get(accountIDs[i]); exists {
+			credentialsRemoved++
+		}
+		if err := store.Delete(accountIDs[i], updatedAt); err != nil {
+			return deleteUnavailableFreeLocalCleanupSummary{}, NewCodedError(http.StatusInternalServerError, CodeInternalError, "codex-manager delete unavailable free local credential cleanup failed", false)
+		}
+	}
+
+	return deleteUnavailableFreeLocalCleanupSummary{
+		CredentialsRemoved:    credentialsRemoved,
+		ProjectionsTombstoned: int64(applySummary.Tombstoned),
+	}, nil
 }
 
 func parseRelayEnabledFromRequest(request relayStatePatchRequest) (bool, error) {
