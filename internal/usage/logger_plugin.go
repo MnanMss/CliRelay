@@ -335,7 +335,8 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 
 	// Write to SQLite (non-blocking, outside lock)
 	go InsertLog(statsKey, modelName, record.Source, record.ChannelName,
-		record.AuthIndex, failed, timestamp, record.LatencyMs, detail)
+		record.AuthIndex, failed, timestamp, record.LatencyMs, detail,
+		record.InputContent, record.OutputContent)
 }
 
 func (s *RequestStatistics) updateAPIStats(stats *apiStats, model string, detail RequestDetail) {

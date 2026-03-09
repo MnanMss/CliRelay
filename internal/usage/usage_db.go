@@ -28,6 +28,7 @@ type LogRow struct {
 	ReasoningTokens int64     `json:"reasoning_tokens"`
 	CachedTokens    int64     `json:"cached_tokens"`
 	TotalTokens     int64     `json:"total_tokens"`
+	HasContent      bool      `json:"has_content"`
 }
 
 // LogQueryParams holds filter/pagination parameters for QueryLogs.
@@ -82,7 +83,9 @@ CREATE TABLE IF NOT EXISTS request_logs (
   output_tokens    INTEGER NOT NULL DEFAULT 0,
   reasoning_tokens INTEGER NOT NULL DEFAULT 0,
   cached_tokens    INTEGER NOT NULL DEFAULT 0,
-  total_tokens     INTEGER NOT NULL DEFAULT 0
+  total_tokens     INTEGER NOT NULL DEFAULT 0,
+  input_content    TEXT NOT NULL DEFAULT '',
+  output_content   TEXT NOT NULL DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON request_logs(timestamp DESC);
@@ -90,6 +93,22 @@ CREATE INDEX IF NOT EXISTS idx_logs_api_key ON request_logs(api_key);
 CREATE INDEX IF NOT EXISTS idx_logs_model ON request_logs(model);
 CREATE INDEX IF NOT EXISTS idx_logs_failed ON request_logs(failed);
 `
+
+// migrateContentColumns adds input_content/output_content columns to an
+// existing request_logs table that was created before this feature.
+func migrateContentColumns(db *sql.DB) {
+	for _, col := range []string{"input_content", "output_content"} {
+		_, err := db.Exec(fmt.Sprintf("ALTER TABLE request_logs ADD COLUMN %s TEXT NOT NULL DEFAULT ''", col))
+		if err != nil {
+			// "duplicate column name" is expected when already migrated
+			if !strings.Contains(err.Error(), "duplicate") {
+				log.Warnf("usage: migrate column %s: %v", col, err)
+			}
+		}
+	}
+}
+
+const maxContentBytes = 100 * 1024 // 100 KB per field
 
 // InitDB opens (or creates) the SQLite database at the given path and creates
 // the request_logs table if it doesn't exist.
@@ -115,6 +134,7 @@ func InitDB(dbPath string) error {
 	}
 
 	usageDB = db
+	migrateContentColumns(db)
 	log.Infof("usage: SQLite database initialised at %s", dbPath)
 	return nil
 }
@@ -134,7 +154,8 @@ func CloseDB() {
 // InsertLog writes a single request log entry into the SQLite database.
 // It is safe to call concurrently.
 func InsertLog(apiKey, model, source, channelName, authIndex string,
-	failed bool, timestamp time.Time, latencyMs int64, tokens TokenStats) {
+	failed bool, timestamp time.Time, latencyMs int64, tokens TokenStats,
+	inputContent, outputContent string) {
 
 	db := getDB()
 	if db == nil {
@@ -146,16 +167,26 @@ func InsertLog(apiKey, model, source, channelName, authIndex string,
 		failedInt = 1
 	}
 
+	// Truncate content to limit storage cost
+	if len(inputContent) > maxContentBytes {
+		inputContent = inputContent[:maxContentBytes] + "\n... (truncated)"
+	}
+	if len(outputContent) > maxContentBytes {
+		outputContent = outputContent[:maxContentBytes] + "\n... (truncated)"
+	}
+
 	_, err := db.Exec(
 		`INSERT INTO request_logs
 			(timestamp, api_key, model, source, channel_name, auth_index,
-			 failed, latency_ms, input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			 failed, latency_ms, input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens,
+			 input_content, output_content)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		timestamp.UTC().Format(time.RFC3339Nano),
 		apiKey, model, source, channelName, authIndex,
 		failedInt, latencyMs,
 		tokens.InputTokens, tokens.OutputTokens, tokens.ReasoningTokens,
 		tokens.CachedTokens, tokens.TotalTokens,
+		inputContent, outputContent,
 	)
 	if err != nil {
 		log.Errorf("usage: insert log: %v", err)
@@ -195,7 +226,8 @@ func QueryLogs(params LogQueryParams) (LogQueryResult, error) {
 	// Fetch page
 	offset := (params.Page - 1) * params.Size
 	querySQL := "SELECT id, timestamp, api_key, model, source, channel_name, auth_index, " +
-		"failed, latency_ms, input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens " +
+		"failed, latency_ms, input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens, " +
+		"(CASE WHEN length(input_content) > 0 OR length(output_content) > 0 THEN 1 ELSE 0 END) as has_content " +
 		"FROM request_logs" + where +
 		" ORDER BY timestamp DESC LIMIT ? OFFSET ?"
 	queryArgs := append(args, params.Size, offset)
@@ -210,17 +242,18 @@ func QueryLogs(params LogQueryParams) (LogQueryResult, error) {
 	for rows.Next() {
 		var row LogRow
 		var ts string
-		var failedInt int
+		var failedInt, hasContentInt int
 		if err := rows.Scan(
 			&row.ID, &ts, &row.APIKey, &row.Model, &row.Source, &row.ChannelName,
 			&row.AuthIndex, &failedInt, &row.LatencyMs,
 			&row.InputTokens, &row.OutputTokens, &row.ReasoningTokens,
-			&row.CachedTokens, &row.TotalTokens,
+			&row.CachedTokens, &row.TotalTokens, &hasContentInt,
 		); err != nil {
 			return LogQueryResult{}, fmt.Errorf("usage: scan row: %w", err)
 		}
 		row.Timestamp, _ = time.Parse(time.RFC3339Nano, ts)
 		row.Failed = failedInt != 0
+		row.HasContent = hasContentInt != 0
 		items = append(items, row)
 	}
 
@@ -410,6 +443,31 @@ func queryDistinct(db *sql.DB, column, cutoff string) ([]string, error) {
 		if v != "" {
 			result = append(result, v)
 		}
+	}
+	return result, nil
+}
+
+// LogContentResult holds the content detail for a single log entry.
+type LogContentResult struct {
+	ID            int64  `json:"id"`
+	InputContent  string `json:"input_content"`
+	OutputContent string `json:"output_content"`
+	Model         string `json:"model"`
+}
+
+// QueryLogContent retrieves the stored request/response content for a single log entry.
+func QueryLogContent(id int64) (LogContentResult, error) {
+	db := getDB()
+	if db == nil {
+		return LogContentResult{}, fmt.Errorf("usage: database not initialised")
+	}
+
+	var result LogContentResult
+	err := db.QueryRow(
+		"SELECT id, model, input_content, output_content FROM request_logs WHERE id = ?", id,
+	).Scan(&result.ID, &result.Model, &result.InputContent, &result.OutputContent)
+	if err != nil {
+		return LogContentResult{}, fmt.Errorf("usage: query log content: %w", err)
 	}
 	return result, nil
 }

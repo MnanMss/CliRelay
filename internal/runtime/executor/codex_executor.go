@@ -178,7 +178,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		}
 
 		if detail, ok := parseCodexUsage(line); ok {
-			reporter.publish(ctx, detail)
+			reporter.publishWithContent(ctx, detail, string(req.Payload), string(data))
 		}
 
 		var param any
@@ -269,7 +269,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 		return resp, err
 	}
 	appendAPIResponseChunk(ctx, e.cfg, data)
-	reporter.publish(ctx, parseOpenAIUsage(data))
+	reporter.publishWithContent(ctx, parseOpenAIUsage(data), string(req.Payload), string(data))
 	reporter.ensurePublished(ctx)
 	var param any
 	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, originalPayload, body, data, &param)
@@ -362,6 +362,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		return nil, err
 	}
 	out := make(chan cliproxyexecutor.StreamChunk)
+	reporter.setInputContent(string(req.Payload))
 	go func() {
 		defer close(out)
 		defer func() {
@@ -375,6 +376,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			appendAPIResponseChunk(ctx, e.cfg, line)
+			reporter.appendOutputChunk(line)
 
 			if bytes.HasPrefix(line, dataTag) {
 				data := bytes.TrimSpace(line[5:])

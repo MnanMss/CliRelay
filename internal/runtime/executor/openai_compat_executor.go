@@ -166,7 +166,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		return resp, err
 	}
 	appendAPIResponseChunk(ctx, e.cfg, body)
-	reporter.publish(ctx, parseOpenAIUsage(body))
+	reporter.publishWithContent(ctx, parseOpenAIUsage(body), string(req.Payload), string(body))
 	// Ensure we at least record the request even if upstream doesn't return usage
 	reporter.ensurePublished(ctx)
 	// Translate response back to source format when needed
@@ -258,6 +258,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		return nil, err
 	}
 	out := make(chan cliproxyexecutor.StreamChunk)
+	reporter.setInputContent(string(req.Payload))
 	go func() {
 		defer close(out)
 		defer func() {
@@ -271,6 +272,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			appendAPIResponseChunk(ctx, e.cfg, line)
+			reporter.appendOutputChunk(line)
 			if detail, ok := parseOpenAIStreamUsage(line); ok {
 				reporter.publish(ctx, detail)
 			}

@@ -138,3 +138,25 @@ func intQueryDefault(c *gin.Context, key string, def int) int {
 	}
 	return n
 }
+
+// GetLogContent returns the stored request/response content for a single log entry.
+func (h *Handler) GetLogContent(c *gin.Context) {
+	idStr := c.Param("id")
+	id, err := strconv.ParseInt(strings.TrimSpace(idStr), 10, 64)
+	if err != nil || id < 1 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid log id"})
+		return
+	}
+
+	result, err := usage.QueryLogContent(id)
+	if err != nil {
+		if strings.Contains(err.Error(), "no rows") {
+			c.JSON(http.StatusNotFound, gin.H{"error": "log entry not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, result)
+}

@@ -21,6 +21,13 @@ type Record struct {
 	LatencyMs   int64
 	Failed      bool
 	Detail      Detail
+
+	// Optional: request/response content for log detail viewer.
+	// These are stored in SQLite when non-empty and can be retrieved via the
+	// /usage/logs/:id/content API. To limit storage cost, each field is
+	// truncated to MaxContentBytes (default 100 KB) before persistence.
+	InputContent  string
+	OutputContent string
 }
 
 // Detail holds the token usage breakdown.

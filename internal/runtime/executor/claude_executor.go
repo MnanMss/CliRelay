@@ -207,7 +207,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 			}
 		}
 	} else {
-		reporter.publish(ctx, parseClaudeUsage(data))
+		reporter.publishWithContent(ctx, parseClaudeUsage(data), string(req.Payload), string(data))
 	}
 	if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
 		data = stripClaudeToolPrefixFromResponse(data, claudeToolPrefix)
@@ -330,6 +330,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		return nil, err
 	}
 	out := make(chan cliproxyexecutor.StreamChunk)
+	reporter.setInputContent(string(req.Payload))
 	go func() {
 		defer close(out)
 		defer func() {
@@ -345,6 +346,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			for scanner.Scan() {
 				line := scanner.Bytes()
 				appendAPIResponseChunk(ctx, e.cfg, line)
+				reporter.appendOutputChunk(line)
 				if detail, ok := parseClaudeStreamUsage(line); ok {
 					reporter.publish(ctx, detail)
 				}
@@ -372,6 +374,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			appendAPIResponseChunk(ctx, e.cfg, line)
+			reporter.appendOutputChunk(line)
 			if detail, ok := parseClaudeStreamUsage(line); ok {
 				reporter.publish(ctx, detail)
 			}
