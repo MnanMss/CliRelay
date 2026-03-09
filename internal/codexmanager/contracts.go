@@ -24,6 +24,35 @@ type Envelope[T any] struct {
 	Data      T      `json:"data"`
 }
 
+type ExportAccountPayload struct {
+	Tokens ExportTokensPayload `json:"tokens"`
+	Meta   ExportMetaPayload   `json:"meta"`
+}
+
+type ExportTokensPayload struct {
+	AccessToken       string `json:"access_token,omitempty"`
+	IDToken           string `json:"id_token,omitempty"`
+	RefreshToken      string `json:"refresh_token,omitempty"`
+	AccountID         string `json:"account_id"`
+	APIKeyAccessToken string `json:"api_key_access_token,omitempty"`
+	LastRefresh       string `json:"last_refresh,omitempty"`
+}
+
+type ExportMetaPayload struct {
+	Label            string            `json:"label"`
+	Issuer           string            `json:"issuer"`
+	GroupName        *string           `json:"groupName,omitempty"`
+	Status           string            `json:"status"`
+	WorkspaceID      *string           `json:"workspaceId,omitempty"`
+	ChatGPTAccountID *string           `json:"chatgptAccountId,omitempty"`
+	Email            *string           `json:"email,omitempty"`
+	BaseURL          *string           `json:"baseUrl,omitempty"`
+	ProxyURL         *string           `json:"proxyUrl,omitempty"`
+	Prefix           *string           `json:"prefix,omitempty"`
+	Headers          map[string]string `json:"headers,omitempty"`
+	ExportedAt       int64             `json:"exportedAt"`
+}
+
 func Success[T any](data T) Envelope[T] {
 	return Envelope[T]{
 		OK:        true,

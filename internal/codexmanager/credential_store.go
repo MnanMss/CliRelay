@@ -392,6 +392,33 @@ func credentialHeadersEqual(left, right map[string]string) bool {
 	return true
 }
 
+func credentialRecordScore(record CredentialRecord) int {
+	score := 0
+	for _, value := range []string{
+		record.AccountID,
+		record.AccountRef,
+		record.ChatGPTAccountID,
+		record.WorkspaceID,
+		record.Email,
+		record.APIKey,
+		record.AccessToken,
+		record.RefreshToken,
+		record.IDToken,
+		record.BaseURL,
+		record.ProxyURL,
+		record.Prefix,
+		record.LastRefresh,
+	} {
+		if strings.TrimSpace(value) != "" {
+			score++
+		}
+	}
+	if len(normalizeCredentialHeaders(record.Headers)) > 0 {
+		score++
+	}
+	return score
+}
+
 func ParseCredentialRecords(contents []string) []CredentialRecord {
 	if len(contents) == 0 {
 		return nil
@@ -413,7 +440,9 @@ func ParseCredentialRecords(contents []string) []CredentialRecord {
 			if normalized.AccountID == "" || !credentialHasExecutableSecret(normalized) {
 				continue
 			}
-			byAccount[normalized.AccountID] = normalized
+			if existing, exists := byAccount[normalized.AccountID]; !exists || credentialRecordScore(normalized) >= credentialRecordScore(existing) {
+				byAccount[normalized.AccountID] = normalized
+			}
 		}
 	}
 	if len(byAccount) == 0 {
@@ -456,10 +485,12 @@ func credentialRecordFromObject(payload map[string]any) (CredentialRecord, bool)
 	}
 	account := mapFromAny(payload["account"])
 	token := mapFromAny(payload["token"])
+	tokens := mapFromAny(payload["tokens"])
 	tokenData := mapFromAny(payload["tokenData"])
 	metadata := mapFromAny(payload["metadata"])
+	meta := mapFromAny(payload["meta"])
 
-	scopes := []map[string]any{payload, account, token, tokenData, metadata}
+	scopes := []map[string]any{payload, account, token, tokens, tokenData, metadata, meta}
 	accountID := firstNonEmptyStringFromScopes(scopes,
 		"accountId",
 		"account_id",
