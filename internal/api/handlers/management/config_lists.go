@@ -7,9 +7,18 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	configaccess "github.com/router-for-me/CLIProxyAPI/v6/internal/access/config_access"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 )
+
+// refreshAPIKeyCache rebuilds the in-memory access provider cache from SQLite.
+// Must be called after every API key write operation.
+func (h *Handler) refreshAPIKeyCache() {
+	if h.cfg != nil {
+		configaccess.Register(&h.cfg.SDKConfig)
+	}
+}
 
 // Generic helpers for list[string]
 func (h *Handler) putStringList(c *gin.Context, set func([]string), after func()) {
@@ -145,6 +154,7 @@ func (h *Handler) PutAPIKeys(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	h.refreshAPIKeyCache()
 	c.JSON(200, gin.H{"status": "ok"})
 }
 func (h *Handler) PatchAPIKeys(c *gin.Context) {
@@ -167,6 +177,7 @@ func (h *Handler) PatchAPIKeys(c *gin.Context) {
 			return
 		}
 	}
+	h.refreshAPIKeyCache()
 	c.JSON(200, gin.H{"status": "ok"})
 }
 func (h *Handler) DeleteAPIKeys(c *gin.Context) {
@@ -175,6 +186,7 @@ func (h *Handler) DeleteAPIKeys(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
+		h.refreshAPIKeyCache()
 		c.JSON(200, gin.H{"status": "ok"})
 		return
 	}
@@ -216,6 +228,7 @@ func (h *Handler) PutAPIKeyEntries(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	h.refreshAPIKeyCache()
 	c.JSON(200, gin.H{"status": "ok"})
 }
 
@@ -276,6 +289,7 @@ func (h *Handler) PatchAPIKeyEntry(c *gin.Context) {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 				return
 			}
+			h.refreshAPIKeyCache()
 			c.JSON(200, gin.H{"status": "ok"})
 			return
 		}
@@ -322,6 +336,7 @@ func (h *Handler) PatchAPIKeyEntry(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	h.refreshAPIKeyCache()
 	c.JSON(200, gin.H{"status": "ok"})
 }
 
@@ -331,6 +346,7 @@ func (h *Handler) DeleteAPIKeyEntry(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
+		h.refreshAPIKeyCache()
 		c.JSON(200, gin.H{"status": "ok"})
 		return
 	}
@@ -343,6 +359,7 @@ func (h *Handler) DeleteAPIKeyEntry(c *gin.Context) {
 					c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 					return
 				}
+				h.refreshAPIKeyCache()
 				c.JSON(200, gin.H{"status": "ok"})
 				return
 			}
