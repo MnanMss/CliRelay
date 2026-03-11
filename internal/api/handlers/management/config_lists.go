@@ -3,10 +3,12 @@ package management
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 )
 
 // Generic helpers for list[string]
@@ -104,25 +106,87 @@ func (h *Handler) deleteFromStringList(c *gin.Context, target *[]string, after f
 	c.JSON(400, gin.H{"error": "missing index or value"})
 }
 
-// api-keys
-func (h *Handler) GetAPIKeys(c *gin.Context) { c.JSON(200, gin.H{"api-keys": h.cfg.APIKeys}) }
+// api-keys (legacy simple list — now backed by SQLite)
+func (h *Handler) GetAPIKeys(c *gin.Context) {
+	rows := usage.ListAPIKeys()
+	keys := make([]string, 0, len(rows))
+	for _, r := range rows {
+		if !r.Disabled {
+			keys = append(keys, r.Key)
+		}
+	}
+	c.JSON(200, gin.H{"api-keys": keys})
+}
 func (h *Handler) PutAPIKeys(c *gin.Context) {
-	h.putStringList(c, func(v []string) {
-		h.cfg.APIKeys = append([]string(nil), v...)
-	}, nil)
+	data, err := c.GetRawData()
+	if err != nil {
+		c.JSON(400, gin.H{"error": "failed to read body"})
+		return
+	}
+	var arr []string
+	if err = json.Unmarshal(data, &arr); err != nil {
+		var obj struct {
+			Items []string `json:"items"`
+		}
+		if err2 := json.Unmarshal(data, &obj); err2 != nil || len(obj.Items) == 0 {
+			c.JSON(400, gin.H{"error": "invalid body"})
+			return
+		}
+		arr = obj.Items
+	}
+	var rows []usage.APIKeyRow
+	for _, k := range arr {
+		trimmed := strings.TrimSpace(k)
+		if trimmed != "" {
+			rows = append(rows, usage.APIKeyRow{Key: trimmed})
+		}
+	}
+	if err := usage.ReplaceAllAPIKeys(rows); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(200, gin.H{"status": "ok"})
 }
 func (h *Handler) PatchAPIKeys(c *gin.Context) {
-	h.patchStringList(c, &h.cfg.APIKeys, func() {})
+	var body struct {
+		Old *string `json:"old"`
+		New *string `json:"new"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil || body.Old == nil || body.New == nil {
+		c.JSON(400, gin.H{"error": "invalid body"})
+		return
+	}
+	oldKey := strings.TrimSpace(*body.Old)
+	newKey := strings.TrimSpace(*body.New)
+	if oldKey != "" {
+		_ = usage.DeleteAPIKey(oldKey)
+	}
+	if newKey != "" {
+		if err := usage.UpsertAPIKey(usage.APIKeyRow{Key: newKey}); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	c.JSON(200, gin.H{"status": "ok"})
 }
 func (h *Handler) DeleteAPIKeys(c *gin.Context) {
-	h.deleteFromStringList(c, &h.cfg.APIKeys, func() {})
+	if val := strings.TrimSpace(c.Query("value")); val != "" {
+		if err := usage.DeleteAPIKey(val); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(200, gin.H{"status": "ok"})
+		return
+	}
+	c.JSON(400, gin.H{"error": "missing value"})
 }
 
-// api-key-entries: []APIKeyEntry (with metadata)
+// api-key-entries: backed by SQLite api_keys table
 func (h *Handler) GetAPIKeyEntries(c *gin.Context) {
-	entries := h.cfg.APIKeyEntries
-	if entries == nil {
-		entries = []config.APIKeyEntry{}
+	rows := usage.ListAPIKeys()
+	entries := make([]config.APIKeyEntry, 0, len(rows))
+	for _, r := range rows {
+		entries = append(entries, r.ToConfigEntry())
 	}
 	c.JSON(200, gin.H{"api-key-entries": entries})
 }
@@ -144,13 +208,15 @@ func (h *Handler) PutAPIKeyEntries(c *gin.Context) {
 		}
 		arr = obj.Items
 	}
-	// Trim whitespace from key values
-	for i := range arr {
-		arr[i].Key = strings.TrimSpace(arr[i].Key)
-		arr[i].Name = strings.TrimSpace(arr[i].Name)
+	var rows []usage.APIKeyRow
+	for _, entry := range arr {
+		rows = append(rows, usage.APIKeyRowFromConfig(entry))
 	}
-	h.cfg.APIKeyEntries = arr
-	h.persist(c)
+	if err := usage.ReplaceAllAPIKeys(rows); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(200, gin.H{"status": "ok"})
 }
 
 func (h *Handler) PatchAPIKeyEntry(c *gin.Context) {
@@ -176,37 +242,51 @@ func (h *Handler) PatchAPIKeyEntry(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "invalid body"})
 		return
 	}
-	targetIndex := -1
-	if body.Index != nil && *body.Index >= 0 && *body.Index < len(h.cfg.APIKeyEntries) {
-		targetIndex = *body.Index
+
+	// Find existing entry by index or match key
+	var targetKey string
+	if body.Match != nil {
+		targetKey = strings.TrimSpace(*body.Match)
 	}
-	if targetIndex == -1 && body.Match != nil {
-		match := strings.TrimSpace(*body.Match)
-		if match != "" {
-			for i := range h.cfg.APIKeyEntries {
-				if h.cfg.APIKeyEntries[i].Key == match {
-					targetIndex = i
-					break
-				}
-			}
+	if targetKey == "" && body.Index != nil {
+		rows := usage.ListAPIKeys()
+		if *body.Index >= 0 && *body.Index < len(rows) {
+			targetKey = rows[*body.Index].Key
 		}
 	}
-	if targetIndex == -1 {
+
+	var entry usage.APIKeyRow
+	if targetKey != "" {
+		if existing := usage.GetAPIKey(targetKey); existing != nil {
+			entry = *existing
+		} else {
+			// If setting a new key via patch, start fresh
+			entry.Key = targetKey
+		}
+	} else {
 		c.JSON(404, gin.H{"error": "item not found"})
 		return
 	}
 
-	entry := h.cfg.APIKeyEntries[targetIndex]
+	// Handle key deletion (empty key)
 	if body.Value.Key != nil {
 		trimmed := strings.TrimSpace(*body.Value.Key)
 		if trimmed == "" {
-			// Empty key removes the entry
-			h.cfg.APIKeyEntries = append(h.cfg.APIKeyEntries[:targetIndex], h.cfg.APIKeyEntries[targetIndex+1:]...)
-			h.persist(c)
+			if err := usage.DeleteAPIKey(targetKey); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			c.JSON(200, gin.H{"status": "ok"})
 			return
+		}
+		// Key change: delete old, insert new
+		if trimmed != targetKey {
+			_ = usage.DeleteAPIKey(targetKey)
 		}
 		entry.Key = trimmed
 	}
+
+	// Apply patches
 	if body.Value.Name != nil {
 		entry.Name = strings.TrimSpace(*body.Value.Name)
 	}
@@ -237,32 +317,35 @@ func (h *Handler) PatchAPIKeyEntry(c *gin.Context) {
 	if body.Value.CreatedAt != nil {
 		entry.CreatedAt = strings.TrimSpace(*body.Value.CreatedAt)
 	}
-	h.cfg.APIKeyEntries[targetIndex] = entry
-	h.persist(c)
+
+	if err := usage.UpsertAPIKey(entry); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(200, gin.H{"status": "ok"})
 }
 
 func (h *Handler) DeleteAPIKeyEntry(c *gin.Context) {
 	if val := strings.TrimSpace(c.Query("key")); val != "" {
-		out := make([]config.APIKeyEntry, 0, len(h.cfg.APIKeyEntries))
-		for _, v := range h.cfg.APIKeyEntries {
-			if v.Key != val {
-				out = append(out, v)
-			}
+		if err := usage.DeleteAPIKey(val); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
 		}
-		if len(out) != len(h.cfg.APIKeyEntries) {
-			h.cfg.APIKeyEntries = out
-			h.persist(c)
-		} else {
-			c.JSON(404, gin.H{"error": "item not found"})
-		}
+		c.JSON(200, gin.H{"status": "ok"})
 		return
 	}
 	if idxStr := c.Query("index"); idxStr != "" {
 		var idx int
-		if _, err := fmt.Sscanf(idxStr, "%d", &idx); err == nil && idx >= 0 && idx < len(h.cfg.APIKeyEntries) {
-			h.cfg.APIKeyEntries = append(h.cfg.APIKeyEntries[:idx], h.cfg.APIKeyEntries[idx+1:]...)
-			h.persist(c)
-			return
+		if _, err := fmt.Sscanf(idxStr, "%d", &idx); err == nil {
+			rows := usage.ListAPIKeys()
+			if idx >= 0 && idx < len(rows) {
+				if err := usage.DeleteAPIKey(rows[idx].Key); err != nil {
+					c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+					return
+				}
+				c.JSON(200, gin.H{"status": "ok"})
+				return
+			}
 		}
 	}
 	c.JSON(400, gin.H{"error": "missing key or index"})

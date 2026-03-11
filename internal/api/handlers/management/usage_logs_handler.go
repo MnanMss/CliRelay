@@ -76,25 +76,23 @@ func (h *Handler) GetUsageLogs(c *gin.Context) {
 }
 
 // buildNameMaps builds two maps from the current config:
-//  1. keyNameMap:     user-facing api_key → display name (from api-key-entries)
+//  1. keyNameMap:     user-facing api_key → display name (from SQLite api_keys table)
 //  2. channelNameMap: provider_api_key → channel name (from provider config Name fields)
 func (h *Handler) buildNameMaps() (keyNameMap, channelNameMap map[string]string) {
 	keyNameMap = make(map[string]string)
 	channelNameMap = make(map[string]string)
 
+	// User-facing API key names from SQLite
+	for _, row := range usage.ListAPIKeys() {
+		if row.Key != "" && row.Name != "" {
+			keyNameMap[row.Key] = row.Name
+		}
+	}
+
 	cfg := h.cfg
 	if cfg == nil {
 		return
 	}
-
-	// User-facing API key names from api-key-entries
-	for _, entry := range cfg.APIKeyEntries {
-		if entry.Key != "" && entry.Name != "" {
-			keyNameMap[entry.Key] = entry.Name
-		}
-	}
-
-	// Channel names from provider configs (provider apiKey → channel name)
 	for _, k := range cfg.GeminiKey {
 		if k.APIKey != "" && k.Name != "" {
 			channelNameMap[k.APIKey] = k.Name

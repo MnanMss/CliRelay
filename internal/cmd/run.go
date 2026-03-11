@@ -32,6 +32,7 @@ func StartService(cfg *config.Config, configPath string, localPassword string) {
 	if err := usage.InitDB(dbPath); err != nil {
 		log.Errorf("usage: failed to initialize SQLite: %v", err)
 	}
+	usage.MigrateAPIKeysFromConfig(cfg)
 	middleware.InitQuotaUsageFuncs(usage.CountTodayByKey, usage.CountTotalByKey, usage.QueryTotalCostByKey)
 	usage.SetTokenUsageCallback(middleware.RecordTokenUsage)
 	usage.InitRedis(cfg.Redis)
@@ -74,6 +75,7 @@ func StartServiceBackground(cfg *config.Config, configPath string, localPassword
 	if err := usage.InitDB(dbPath); err != nil {
 		log.Errorf("usage: failed to initialize SQLite: %v", err)
 	}
+	usage.MigrateAPIKeysFromConfig(cfg)
 	middleware.InitQuotaUsageFuncs(usage.CountTodayByKey, usage.CountTotalByKey, usage.QueryTotalCostByKey)
 	usage.SetTokenUsageCallback(middleware.RecordTokenUsage)
 	usage.InitRedis(cfg.Redis)

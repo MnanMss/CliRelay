@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 )
@@ -30,10 +31,34 @@ func Register(cfg *sdkconfig.SDKConfig) {
 }
 
 // buildKeyConfigMap builds a map from API key to its full configuration.
-// Keys from both APIKeys (legacy, no restrictions) and APIKeyEntries are included.
+// Primary source: SQLite api_keys table (via usage.ListAPIKeys).
+// Fallback: legacy APIKeys and APIKeyEntries from YAML config.
 func buildKeyConfigMap(cfg *sdkconfig.SDKConfig) map[string]keyConfig {
 	result := make(map[string]keyConfig)
-	// APIKeyEntries first — they have the more specific config
+
+	// Primary: load from SQLite
+	rows := usage.ListAPIKeys()
+	for _, row := range rows {
+		trimmed := strings.TrimSpace(row.Key)
+		if trimmed == "" || row.Disabled {
+			continue
+		}
+		if _, exists := result[trimmed]; exists {
+			continue
+		}
+		result[trimmed] = keyConfig{
+			allowedModels:    row.AllowedModels,
+			dailyLimit:       row.DailyLimit,
+			totalQuota:       row.TotalQuota,
+			spendingLimit:    row.SpendingLimit,
+			concurrencyLimit: row.ConcurrencyLimit,
+			rpmLimit:         row.RPMLimit,
+			tpmLimit:         row.TPMLimit,
+			systemPrompt:     row.SystemPrompt,
+		}
+	}
+
+	// Fallback: YAML config (for backward compatibility during migration)
 	for _, entry := range cfg.APIKeyEntries {
 		trimmed := strings.TrimSpace(entry.Key)
 		if trimmed == "" || entry.Disabled {
@@ -53,7 +78,6 @@ func buildKeyConfigMap(cfg *sdkconfig.SDKConfig) map[string]keyConfig {
 			systemPrompt:     entry.SystemPrompt,
 		}
 	}
-	// Legacy APIKeys — no restrictions
 	for _, k := range cfg.APIKeys {
 		trimmed := strings.TrimSpace(k)
 		if trimmed == "" {
