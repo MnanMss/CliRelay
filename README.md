@@ -170,13 +170,31 @@ Edit `config.yaml` to add your API keys or OAuth credentials.
 
 ### 🐳 Docker (Recommended)
 
-**One-Click Deploy** — run this on any Linux server (Debian / Ubuntu / CentOS / RHEL / Fedora):
+**One-Click Deploy** — run this on Linux `amd64` or `arm64` servers (Debian / Ubuntu / CentOS / RHEL / Fedora):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/kittors/CliRelay/main/install.sh | bash
 ```
 
-The script will **automatically install Docker** if not present, walk you through interactive configuration, and start the service. After completion it outputs your server IP + port and a reverse-proxy setup guide.
+The script will:
+
+- automatically install Docker when needed
+- detect the host architecture and pin the correct Docker platform for `amd64` / `arm64`
+- let you choose **English** or **Chinese** during installation
+- persist that language into the container so the built-in TUI starts in the selected language by default
+- install a local `clirelay` helper command for day-2 operations
+
+After installation, use:
+
+```bash
+clirelay status
+clirelay update
+clirelay restart
+clirelay logs
+clirelay tui
+```
+
+`clirelay update` keeps the existing configuration and only refreshes the image + containers, so ongoing upgrades stay simple.
 
 > 💡 If `curl` is not installed, install it first:
 > ```bash
@@ -192,6 +210,8 @@ Or deploy manually with Docker Compose:
 ```bash
 docker compose up -d
 ```
+
+For manual Docker deployments, you can also set `CLIRELAY_LOCALE=en` or `CLIRELAY_LOCALE=zh` in your Compose environment to control the default TUI language.
 
 ### 🗄️ Enabling Data Persistence
 

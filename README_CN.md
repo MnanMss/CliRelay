@@ -170,13 +170,31 @@ cp config.example.yaml config.yaml
 
 ### 🐳 Docker 部署（推荐）
 
-**一键部署** — 在任意 Linux 服务器上执行（兼容 Debian / Ubuntu / CentOS / RHEL / Fedora）：
+**一键部署** — 在 Linux `amd64` 或 `arm64` 服务器上执行（兼容 Debian / Ubuntu / CentOS / RHEL / Fedora）：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/kittors/CliRelay/main/install.sh | bash
 ```
 
-脚本会**自动安装 Docker**（如未安装），引导你完成交互式配置，并启动服务。部署完成后会输出服务器 IP + 端口，并提示配置反向代理。
+脚本会：
+
+- 在缺少 Docker 时自动安装 Docker
+- 自动识别宿主机架构，并为 `amd64` / `arm64` 固定正确的 Docker platform
+- 在安装时让你选择 **中文** 或 **English**
+- 将语言选择持久化到容器环境，让内置 TUI 默认以对应语言启动
+- 安装本地 `clirelay` 管理命令，方便后续运维
+
+安装完成后可以直接使用：
+
+```bash
+clirelay status
+clirelay update
+clirelay restart
+clirelay logs
+clirelay tui
+```
+
+其中 `clirelay update` 会保留现有配置，只刷新镜像和容器，后续升级维护会更省事。
 
 > 💡 如果系统没有 `curl` 命令，请先安装：
 > ```bash
@@ -192,6 +210,8 @@ curl -fsSL https://raw.githubusercontent.com/kittors/CliRelay/main/install.sh | 
 ```bash
 docker compose up -d
 ```
+
+如果你是手动使用 Docker Compose 部署，也可以在环境变量中设置 `CLIRELAY_LOCALE=en` 或 `CLIRELAY_LOCALE=zh`，控制 TUI 的默认语言。
 
 ### 🗄️ 开启数据持久化
 
