@@ -41,6 +41,42 @@ DOCKER_PLATFORM=""
 DOCKER_ARCH=""
 HELPER_PATH=""
 
+can_prompt() {
+    [[ -r /dev/tty ]]
+}
+
+prompt_input() {
+    local prompt="$1"
+    local default_value="${2:-}"
+    local reply=""
+
+    if ! can_prompt; then
+        return 1
+    fi
+
+    printf "%b" "$prompt" >/dev/tty
+    if ! IFS= read -r reply </dev/tty; then
+        return 1
+    fi
+
+    if [[ -z "$reply" ]]; then
+        reply="$default_value"
+    fi
+
+    printf '%s' "$reply"
+}
+
+require_interactive_config() {
+    if can_prompt; then
+        return
+    fi
+    if is_zh; then
+        fail "当前运行方式没有可交互终端，无法完成安装配置。请直接执行 'bash install.sh'，或先下载脚本后在交互终端中运行。"
+    else
+        fail "No interactive terminal is available for configuration. Please run 'bash install.sh' directly, or download the script and run it from an interactive terminal."
+    fi
+}
+
 normalize_locale() {
     local raw
     raw="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
@@ -203,7 +239,7 @@ select_language() {
         return
     fi
     set_locale "$(detect_default_locale)"
-    if [[ ! -t 0 ]]; then
+    if ! can_prompt; then
         return
     fi
 
@@ -218,7 +254,7 @@ select_language() {
     echo ""
     echo "  1) English"
     echo "  2) 中文"
-    read -r -p "  $(echo -e "${C_CYAN}?${C_RESET}") Select language / 选择语言 [${default_choice}]: " choice
+    choice="$(prompt_input "  $(echo -e "${C_CYAN}?${C_RESET}") Select language / 选择语言 [${default_choice}]: " "${default_choice}")" || choice="${default_choice}"
     case "${choice:-$default_choice}" in
         1|en|EN|english|English) set_locale "en" ;;
         2|zh|ZH|cn|CN|中文) set_locale "zh" ;;
@@ -363,6 +399,7 @@ load_existing_state() {
 }
 
 prompt_config() {
+    require_interactive_config
     echo ""
     if is_zh; then
         echo -e "  ${C_BG_BLUE}${C_WHITE}${C_BOLD} 服务配置 ${C_RESET}"
@@ -384,10 +421,10 @@ prompt_config() {
         remote_prompt="Allow remote management? [Y/n]"
     fi
 
-    read -r -p "  $(echo -e "${C_CYAN}?${C_RESET}") ${port_prompt} [${DEFAULT_PORT}]: " CFG_PORT
+    CFG_PORT="$(prompt_input "  $(echo -e "${C_CYAN}?${C_RESET}") ${port_prompt} [${DEFAULT_PORT}]: " "${DEFAULT_PORT}")" || CFG_PORT="${DEFAULT_PORT}"
     CFG_PORT="${CFG_PORT:-$DEFAULT_PORT}"
 
-    read -r -p "  $(echo -e "${C_CYAN}?${C_RESET}") ${secret_prompt}: " CFG_SECRET
+    CFG_SECRET="$(prompt_input "  $(echo -e "${C_CYAN}?${C_RESET}") ${secret_prompt}: " "")" || CFG_SECRET=""
     if [[ -z "$CFG_SECRET" ]]; then
         CFG_SECRET="$(rand_hex 16)"
         if is_zh; then
@@ -397,7 +434,7 @@ prompt_config() {
         fi
     fi
 
-    read -r -p "  $(echo -e "${C_CYAN}?${C_RESET}") ${key_prompt}: " CFG_API_KEY
+    CFG_API_KEY="$(prompt_input "  $(echo -e "${C_CYAN}?${C_RESET}") ${key_prompt}: " "")" || CFG_API_KEY=""
     if [[ -z "$CFG_API_KEY" ]]; then
         CFG_API_KEY="sk-$(rand_hex 16)"
         if is_zh; then
@@ -407,7 +444,7 @@ prompt_config() {
         fi
     fi
 
-    read -r -p "  $(echo -e "${C_CYAN}?${C_RESET}") ${remote_prompt} " yn
+    yn="$(prompt_input "  $(echo -e "${C_CYAN}?${C_RESET}") ${remote_prompt} " "")" || yn=""
     case "$yn" in
         [Nn]*) CFG_REMOTE="false" ;;
         *) CFG_REMOTE="true" ;;
@@ -740,10 +777,10 @@ uninstall() {
     banner
     if is_zh; then
         echo -e "  ${C_BG_RED}${C_WHITE}${C_BOLD} 卸载 CliRelay ${C_RESET}"
-        read -r -p "  $(echo -e "${C_RED}?${C_RESET}") 确认卸载? 配置和数据将被删除 [y/N]: " yn
+        yn="$(prompt_input "  $(echo -e "${C_RED}?${C_RESET}") 确认卸载? 配置和数据将被删除 [y/N]: " "N")" || yn="N"
     else
         echo -e "  ${C_BG_RED}${C_WHITE}${C_BOLD} Uninstall CliRelay ${C_RESET}"
-        read -r -p "  $(echo -e "${C_RED}?${C_RESET}") Confirm uninstall? Configuration and data will be deleted [y/N]: " yn
+        yn="$(prompt_input "  $(echo -e "${C_RED}?${C_RESET}") Confirm uninstall? Configuration and data will be deleted [y/N]: " "N")" || yn="N"
     fi
     case "$yn" in
         [Yy]*)
@@ -789,10 +826,10 @@ main() {
         banner
         if is_zh; then
             warn "检测到已有安装: ${INSTALL_DIR}"
-            read -r -p "  $(echo -e "${C_CYAN}?${C_RESET}") 选择操作 [1=更新 2=重装 3=取消]: " choice
+            choice="$(prompt_input "  $(echo -e "${C_CYAN}?${C_RESET}") 选择操作 [1=更新 2=重装 3=取消]: " "1")" || choice="1"
         else
             warn "Existing installation detected at ${INSTALL_DIR}"
-            read -r -p "  $(echo -e "${C_CYAN}?${C_RESET}") Choose action [1=update 2=reinstall 3=cancel]: " choice
+            choice="$(prompt_input "  $(echo -e "${C_CYAN}?${C_RESET}") Choose action [1=update 2=reinstall 3=cancel]: " "1")" || choice="1"
         fi
         case "$choice" in
             1) is_update=true ;;
