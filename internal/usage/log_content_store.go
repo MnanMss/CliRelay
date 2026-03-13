@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/klauspost/compress/zstd"
@@ -13,6 +15,17 @@ import (
 )
 
 const requestLogContentCompression = "zstd"
+
+const (
+	// Avoid vacuuming too frequently; VACUUM can be expensive on large DBs.
+	sqliteVacuumMinInterval = 2 * time.Hour
+
+	// Only vacuum when there's enough reclaimable space to matter.
+	sqliteVacuumMinReclaimBytes = 64 << 20 // 64 MiB
+
+	// If reclaimable bytes are smaller, require a higher ratio to vacuum.
+	sqliteVacuumMinReclaimRatio = 0.20
+)
 
 type requestLogStorageRuntime struct {
 	StoreContent           bool
@@ -27,12 +40,15 @@ var (
 		StoreContent:           true,
 		ContentRetentionDays:   30,
 		CleanupIntervalMinutes: 1440,
-		MaxTotalSizeMB:         0,
+		MaxTotalSizeMB:         1024,
 		VacuumOnCleanup:        true,
 	}
 
 	requestLogMaintenanceCancel context.CancelFunc
 	requestLogMaintenanceWG     sync.WaitGroup
+	requestLogMaintenanceWakeup chan struct{}
+
+	lastUsageVacuumUnixNano atomic.Int64
 
 	zstdEncoderPool = sync.Pool{
 		New: func() any {
@@ -64,7 +80,7 @@ func normalizeRequestLogStorageConfig(cfg config.RequestLogStorageConfig) reques
 			StoreContent:           true,
 			ContentRetentionDays:   30,
 			CleanupIntervalMinutes: 1440,
-			MaxTotalSizeMB:         0,
+			MaxTotalSizeMB:         1024,
 			VacuumOnCleanup:        true,
 		}
 	}
@@ -95,6 +111,17 @@ func maxLogContentBytes() int64 {
 	return int64(requestLogStorage.MaxTotalSizeMB) * 1024 * 1024
 }
 
+func triggerRequestLogCompaction() {
+	ch := requestLogMaintenanceWakeup
+	if ch == nil {
+		return
+	}
+	select {
+	case ch <- struct{}{}:
+	default:
+	}
+}
+
 func startRequestLogMaintenance(db *sql.DB) {
 	stopRequestLogMaintenance()
 	if db == nil || !requestLogStorage.StoreContent {
@@ -102,6 +129,8 @@ func startRequestLogMaintenance(db *sql.DB) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	requestLogMaintenanceCancel = cancel
+	requestLogMaintenanceWakeup = make(chan struct{}, 1)
+	wakeup := requestLogMaintenanceWakeup
 	requestLogMaintenanceWG.Add(1)
 	go func() {
 		defer requestLogMaintenanceWG.Done()
@@ -114,6 +143,11 @@ func startRequestLogMaintenance(db *sql.DB) {
 			select {
 			case <-ctx.Done():
 				return
+			case <-wakeup:
+				// Compaction wakeup (triggered by size-cap pruning during inserts).
+				// Avoid running the full cleanup pass; this is mainly for shrinking WAL
+				// and reclaiming free pages when appropriate.
+				compactLogContentStorageInternal(db, false)
 			case <-ticker.C:
 				runRequestLogMaintenancePass(db)
 			}
@@ -127,6 +161,7 @@ func stopRequestLogMaintenance() {
 		requestLogMaintenanceWG.Wait()
 		requestLogMaintenanceCancel = nil
 	}
+	requestLogMaintenanceWakeup = nil
 }
 
 func runRequestLogMaintenancePass(db *sql.DB) {
@@ -163,9 +198,10 @@ func runRequestLogMaintenancePass(db *sql.DB) {
 		log.Infof("usage: pruned %d request log content rows to enforce size cap", trimmed)
 	}
 
-	if deleted+trimmed > 0 {
-		compactLogContentStorage(db)
-	}
+	// Always run checkpoint + conditional vacuum. This ensures:
+	// - WAL is periodically truncated (usage.db-wal doesn't grow unbounded)
+	// - Large amounts of free pages can be reclaimed even if no rows were changed in this pass
+	compactLogContentStorageInternal(db, true)
 }
 
 func insertLogContentTx(tx *sql.Tx, logID int64, timestamp time.Time, inputContent, outputContent string) error {
@@ -207,8 +243,12 @@ func insertLogContentTx(tx *sql.Tx, logID int64, timestamp time.Time, inputConte
 		return fmt.Errorf("usage: insert compressed content: %w", err)
 	}
 	if maxBytes > 0 {
-		if _, err := cleanupOversizedLogContentQuerier(tx, maxBytes); err != nil {
+		deleted, errCleanup := cleanupOversizedLogContentQuerier(tx, maxBytes)
+		if errCleanup != nil {
 			return fmt.Errorf("usage: enforce content size cap: %w", err)
+		}
+		if deleted > 0 {
+			triggerRequestLogCompaction()
 		}
 	}
 	return nil
@@ -484,16 +524,140 @@ func compactLogContentStorage(db *sql.DB) {
 	if db == nil {
 		return
 	}
-	if _, err := db.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
-		log.Warnf("usage: wal checkpoint after content cleanup failed: %v", err)
+	compactLogContentStorageInternal(db, true)
+}
+
+type sqliteSpaceStats struct {
+	PageSize      int64
+	PageCount     int64
+	FreeListCount int64
+}
+
+func querySQLiteSpaceStats(q logContentQuerier) (sqliteSpaceStats, error) {
+	if q == nil {
+		return sqliteSpaceStats{}, fmt.Errorf("usage: nil querier")
 	}
-	if requestLogStorage.VacuumOnCleanup {
+	var pageSize int64
+	if err := q.QueryRow("PRAGMA page_size").Scan(&pageSize); err != nil {
+		return sqliteSpaceStats{}, err
+	}
+	var pageCount int64
+	if err := q.QueryRow("PRAGMA page_count").Scan(&pageCount); err != nil {
+		return sqliteSpaceStats{}, err
+	}
+	var freeListCount int64
+	if err := q.QueryRow("PRAGMA freelist_count").Scan(&freeListCount); err != nil {
+		return sqliteSpaceStats{}, err
+	}
+	return sqliteSpaceStats{
+		PageSize:      pageSize,
+		PageCount:     pageCount,
+		FreeListCount: freeListCount,
+	}, nil
+}
+
+func reclaimableBytes(stats sqliteSpaceStats) int64 {
+	if stats.PageSize <= 0 || stats.FreeListCount <= 0 {
+		return 0
+	}
+	return stats.PageSize * stats.FreeListCount
+}
+
+func shouldVacuum(stats sqliteSpaceStats) bool {
+	if stats.PageSize <= 0 || stats.PageCount <= 0 || stats.FreeListCount <= 0 {
+		return false
+	}
+
+	freeBytes := reclaimableBytes(stats)
+	if freeBytes < sqliteVacuumMinReclaimBytes {
+		// For smaller DBs/fragmentation, avoid vacuum unless fragmentation ratio is high.
+		ratio := float64(stats.FreeListCount) / float64(stats.PageCount)
+		return ratio >= sqliteVacuumMinReclaimRatio && freeBytes >= (sqliteVacuumMinReclaimBytes/2)
+	}
+	return true
+}
+
+func vacuumAllowedNow(now time.Time) bool {
+	lastNano := lastUsageVacuumUnixNano.Load()
+	if lastNano <= 0 {
+		return true
+	}
+	last := time.Unix(0, lastNano)
+	if last.IsZero() {
+		return true
+	}
+	return now.Sub(last) >= sqliteVacuumMinInterval
+}
+
+func markVacuumRan(now time.Time) {
+	if now.IsZero() {
+		now = time.Now()
+	}
+	lastUsageVacuumUnixNano.Store(now.UnixNano())
+}
+
+func usageWALPath() string {
+	if usageDBPath == "" {
+		return ""
+	}
+	return usageDBPath + "-wal"
+}
+
+func walBytesOnDisk() int64 {
+	path := usageWALPath()
+	if path == "" {
+		return 0
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0
+	}
+	return info.Size()
+}
+
+func compactLogContentStorageInternal(db *sql.DB, allowOptimize bool) {
+	if db == nil {
+		return
+	}
+
+	if _, err := db.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+		log.Warnf("usage: wal checkpoint failed: %v", err)
+	}
+
+	stats, errStats := querySQLiteSpaceStats(db)
+	if errStats != nil {
+		// If we can't read stats, still keep WAL under control and try optimize if asked.
+		if allowOptimize {
+			if _, err := db.Exec("PRAGMA optimize"); err != nil {
+				log.Warnf("usage: sqlite optimize failed: %v", err)
+			}
+		}
+		return
+	}
+
+	didVacuum := false
+	now := time.Now()
+	if requestLogStorage.VacuumOnCleanup && shouldVacuum(stats) && vacuumAllowedNow(now) {
+		freeBytes := reclaimableBytes(stats)
+		log.Infof("usage: reclaimable sqlite free space detected (freelist=%d pages, approx=%d bytes), running VACUUM", stats.FreeListCount, freeBytes)
 		if _, err := db.Exec("VACUUM"); err != nil {
-			log.Warnf("usage: vacuum after content cleanup failed: %v", err)
+			log.Warnf("usage: vacuum failed: %v", err)
+		} else {
+			didVacuum = true
+			markVacuumRan(now)
 		}
 	}
-	if _, err := db.Exec("PRAGMA optimize"); err != nil {
-		log.Warnf("usage: sqlite optimize after content cleanup failed: %v", err)
+
+	// Optimize when asked (maintenance pass) or after a successful VACUUM.
+	if allowOptimize || didVacuum {
+		if _, err := db.Exec("PRAGMA optimize"); err != nil {
+			log.Warnf("usage: sqlite optimize failed: %v", err)
+		}
+	}
+
+	// If WAL is still large after checkpoint, surface it as a hint in logs.
+	if walBytes := walBytesOnDisk(); walBytes > 0 && walBytes >= (64<<20) {
+		log.Warnf("usage: sqlite WAL remains large after checkpoint (%d bytes at %s); consider lowering cleanup-interval-minutes or checking long-lived transactions", walBytes, usageWALPath())
 	}
 }
 
