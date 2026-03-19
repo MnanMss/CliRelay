@@ -205,7 +205,6 @@ type apiStats struct {
 type modelStats struct {
 	TotalRequests int64
 	TotalTokens   int64
-	Details       []RequestDetail
 }
 
 // RequestDetail stores the timestamp and token usage for a single request.
@@ -252,26 +251,14 @@ type APISnapshot struct {
 
 // ModelSnapshot summarises metrics for a specific model.
 type ModelSnapshot struct {
-	TotalRequests int64           `json:"total_requests"`
-	TotalTokens   int64           `json:"total_tokens"`
-	Details       []RequestDetail `json:"details"`
+	TotalRequests int64 `json:"total_requests"`
+	TotalTokens   int64 `json:"total_tokens"`
 }
 
-// SanitizeForPublic strips sensitive fields (provider API keys stored in Source,
-// and AuthIndex) from all request details in the snapshot. This MUST be called
-// before returning data through any public (unauthenticated) endpoint.
+// SanitizeForPublic strips sensitive fields from all request details in the snapshot.
+// This MUST be called before returning data through any public (unauthenticated) endpoint.
 func (s *StatisticsSnapshot) SanitizeForPublic() {
-	for apiKey, apiSnap := range s.APIs {
-		for modelName, modelSnap := range apiSnap.Models {
-			for i := range modelSnap.Details {
-				modelSnap.Details[i].Source = ""
-				modelSnap.Details[i].AuthIndex = ""
-				modelSnap.Details[i].ChannelName = ""
-			}
-			apiSnap.Models[modelName] = modelSnap
-		}
-		s.APIs[apiKey] = apiSnap
-	}
+	// No-op: Details are no longer stored in the snapshot.
 }
 
 var defaultRequestStatistics = NewRequestStatistics()
@@ -367,7 +354,6 @@ func (s *RequestStatistics) updateAPIStats(stats *apiStats, model string, detail
 	}
 	modelStatsValue.TotalRequests++
 	modelStatsValue.TotalTokens += detail.Tokens.TotalTokens
-	modelStatsValue.Details = append(modelStatsValue.Details, detail)
 }
 
 // Snapshot returns a copy of the aggregated metrics for external consumption.
@@ -393,12 +379,9 @@ func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 			Models:        make(map[string]ModelSnapshot, len(stats.Models)),
 		}
 		for modelName, modelStatsValue := range stats.Models {
-			requestDetails := make([]RequestDetail, len(modelStatsValue.Details))
-			copy(requestDetails, modelStatsValue.Details)
 			apiSnapshot.Models[modelName] = ModelSnapshot{
 				TotalRequests: modelStatsValue.TotalRequests,
 				TotalTokens:   modelStatsValue.TotalTokens,
-				Details:       requestDetails,
 			}
 		}
 		result.APIs[apiName] = apiSnapshot
@@ -445,20 +428,7 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResu
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	seen := make(map[string]struct{})
-	for apiName, stats := range s.apis {
-		if stats == nil {
-			continue
-		}
-		for modelName, modelStatsValue := range stats.Models {
-			if modelStatsValue == nil {
-				continue
-			}
-			for _, detail := range modelStatsValue.Details {
-				seen[dedupKey(apiName, modelName, detail)] = struct{}{}
-			}
-		}
-	}
+	// No details loop required anymore
 
 	for apiName, apiSnapshot := range snapshot.APIs {
 		apiName = strings.TrimSpace(apiName)
@@ -477,20 +447,31 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResu
 			if modelName == "" {
 				modelName = "unknown"
 			}
-			for _, detail := range modelSnapshot.Details {
-				detail.Tokens = normaliseTokenStats(detail.Tokens)
-				if detail.Timestamp.IsZero() {
-					detail.Timestamp = time.Now()
-				}
-				key := dedupKey(apiName, modelName, detail)
-				if _, exists := seen[key]; exists {
-					result.Skipped++
-					continue
-				}
-				seen[key] = struct{}{}
-				s.recordImported(apiName, modelName, stats, detail)
-				result.Added++
+
+			// Migrate counters directly bypassing dedup
+			modelTotalTokens := modelSnapshot.TotalTokens
+			if modelTotalTokens < 0 {
+				modelTotalTokens = 0
 			}
+
+			s.totalRequests += modelSnapshot.TotalRequests
+			// successCount and failureCount are not accurately split per model in old versions,
+			// just lump into successCount for simple migration of aggregates
+			s.successCount += modelSnapshot.TotalRequests
+			s.totalTokens += modelTotalTokens
+
+			stats.TotalRequests += modelSnapshot.TotalRequests
+			stats.TotalTokens += modelTotalTokens
+
+			modelStatsValue, ok := stats.Models[modelName]
+			if !ok {
+				modelStatsValue = &modelStats{}
+				stats.Models[modelName] = modelStatsValue
+			}
+			modelStatsValue.TotalRequests += modelSnapshot.TotalRequests
+			modelStatsValue.TotalTokens += modelTotalTokens
+
+			result.Added += modelSnapshot.TotalRequests
 		}
 	}
 

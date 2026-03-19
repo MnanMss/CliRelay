@@ -150,7 +150,10 @@ func InitDB(dbPath string, storageCfg config.RequestLogStorageConfig, loc *time.
 	usageLoc = loc
 
 	log.Debugf("usage: opening SQLite database at %s", dbPath)
-	db, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL&_busy_timeout=5000")
+	// NOTE: Do NOT use _journal_mode or _busy_timeout in the connection string.
+	// Those are mattn/go-sqlite3 (CGO) conventions. modernc.org/sqlite ignores them,
+	// causing data to stay in-memory without flushing to disk.
+	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return fmt.Errorf("usage: open sqlite: %w", err)
 	}
@@ -165,6 +168,18 @@ func InitDB(dbPath string, storageCfg config.RequestLogStorageConfig, loc *time.
 	if err := db.PingContext(pingCtx); err != nil {
 		_ = db.Close()
 		return fmt.Errorf("usage: ping sqlite: %w", err)
+	}
+
+	// Set PRAGMAs explicitly via Exec because modernc.org/sqlite does NOT
+	// support the _pragma=value connection-string syntax used by mattn/go-sqlite3.
+	if _, err := db.Exec("PRAGMA busy_timeout = 5000"); err != nil {
+		_ = db.Close()
+		return fmt.Errorf("usage: set busy_timeout: %w", err)
+	}
+	if res, err := db.Exec("PRAGMA journal_mode = WAL"); err != nil {
+		log.Warnf("usage: failed to enable WAL journal mode: %v (data may not persist correctly)", err)
+	} else {
+		log.Debugf("usage: journal_mode set (result: %v)", res)
 	}
 
 	log.Debugf("usage: creating tables")
@@ -364,7 +379,7 @@ func QueryFilters(days int) (FilterOptions, error) {
 		days = 7
 	}
 
-	cutoff := cutoffStartUTC(days).Format(time.RFC3339)
+	cutoff := CutoffStartUTC(days).Format(time.RFC3339)
 
 	keys, err := queryDistinct(db, "api_key", cutoff)
 	if err != nil {
@@ -411,71 +426,74 @@ func QueryStats(params LogQueryParams) (LogStats, error) {
 	}, nil
 }
 
-// MigrateFromSnapshot imports all request details from an existing
-// StatisticsSnapshot into SQLite. It skips rows that already exist
-// (based on a count check to avoid duplicating on restart).
-func MigrateFromSnapshot(snapshot StatisticsSnapshot) (int64, error) {
+// DashboardKPI holds the aggregated KPI data needed by the dashboard page.
+type DashboardKPI struct {
+	TotalRequests   int64   `json:"total_requests"`
+	SuccessRequests int64   `json:"success_requests"`
+	FailedRequests  int64   `json:"failed_requests"`
+	SuccessRate     float64 `json:"success_rate"`
+	InputTokens     int64   `json:"input_tokens"`
+	OutputTokens    int64   `json:"output_tokens"`
+	ReasoningTokens int64   `json:"reasoning_tokens"`
+	CachedTokens    int64   `json:"cached_tokens"`
+	TotalTokens     int64   `json:"total_tokens"`
+}
+
+// QueryDashboardKPI returns aggregated KPI data from SQLite for the dashboard.
+// This replaces the old in-memory snapshot-based counting which lost data on restart.
+func QueryDashboardKPI(days int) (DashboardKPI, error) {
 	db := getDB()
 	if db == nil {
-		return 0, nil
+		return DashboardKPI{}, nil
+	}
+	if days < 1 {
+		days = 7
 	}
 
-	// Check if data already exists
-	var count int64
-	if err := db.QueryRow("SELECT COUNT(*) FROM request_logs").Scan(&count); err != nil {
-		return 0, fmt.Errorf("usage: migration count: %w", err)
-	}
-	if count > 0 {
-		log.Infof("usage: SQLite already has %d rows, skipping migration", count)
-		return 0, nil
-	}
+	cutoff := CutoffStartUTC(days).Format(time.RFC3339)
 
-	tx, err := db.Begin()
+	var kpi DashboardKPI
+	err := db.QueryRow(`
+		SELECT
+			COUNT(*),
+			COALESCE(SUM(CASE WHEN failed=0 THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN failed=1 THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(input_tokens), 0),
+			COALESCE(SUM(output_tokens), 0),
+			COALESCE(SUM(reasoning_tokens), 0),
+			COALESCE(SUM(cached_tokens), 0),
+			COALESCE(SUM(total_tokens), 0)
+		FROM request_logs
+		WHERE timestamp >= ?
+	`, cutoff).Scan(
+		&kpi.TotalRequests,
+		&kpi.SuccessRequests,
+		&kpi.FailedRequests,
+		&kpi.InputTokens,
+		&kpi.OutputTokens,
+		&kpi.ReasoningTokens,
+		&kpi.CachedTokens,
+		&kpi.TotalTokens,
+	)
 	if err != nil {
-		return 0, fmt.Errorf("usage: begin migration tx: %w", err)
+		return DashboardKPI{}, fmt.Errorf("usage: dashboard KPI query: %w", err)
 	}
 
-	stmt, err := tx.Prepare(`INSERT INTO request_logs
-		(timestamp, api_key, model, source, channel_name, auth_index,
-		 failed, latency_ms, input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-	if err != nil {
-		_ = tx.Rollback()
-		return 0, fmt.Errorf("usage: prepare migration stmt: %w", err)
-	}
-	defer stmt.Close()
-
-	var imported int64
-	for apiKey, apiData := range snapshot.APIs {
-		for model, modelData := range apiData.Models {
-			for _, detail := range modelData.Details {
-				failedInt := 0
-				if detail.Failed {
-					failedInt = 1
-				}
-				_, err := stmt.Exec(
-					detail.Timestamp.UTC().Format(time.RFC3339Nano),
-					apiKey, model, detail.Source, detail.ChannelName, detail.AuthIndex,
-					failedInt, detail.LatencyMs,
-					detail.Tokens.InputTokens, detail.Tokens.OutputTokens,
-					detail.Tokens.ReasoningTokens, detail.Tokens.CachedTokens,
-					detail.Tokens.TotalTokens,
-				)
-				if err != nil {
-					_ = tx.Rollback()
-					return imported, fmt.Errorf("usage: migration insert: %w", err)
-				}
-				imported++
-			}
-		}
+	if kpi.TotalRequests > 0 {
+		kpi.SuccessRate = float64(kpi.SuccessRequests) / float64(kpi.TotalRequests) * 100
 	}
 
-	if err := tx.Commit(); err != nil {
-		return imported, fmt.Errorf("usage: commit migration: %w", err)
-	}
+	return kpi, nil
+}
 
-	log.Infof("usage: migrated %d request logs from snapshot to SQLite", imported)
-	return imported, nil
+// MigrateFromSnapshot imports all request details from an existing
+// MigrateFromSnapshot is retained for API compatibility but no longer
+// migrates individual request details as they are no longer stored in memory.
+func MigrateFromSnapshot(snapshot StatisticsSnapshot) (int64, error) {
+	// Re-enable this to logic to parse aggregates if needed.
+	// We no longer migrate Details since we no longer keep track of them in memory
+	// and they are persisted real-time.
+	return 0, nil
 }
 
 // --- internal helpers ---
@@ -505,7 +523,10 @@ func cutoffStartUTCAt(now time.Time, days int) time.Time {
 	return todayStartLocal.AddDate(0, 0, -(days - 1)).UTC()
 }
 
-func cutoffStartUTC(days int) time.Time {
+// CutoffStartUTC returns the start-of-day cutoff for the given number of days
+// in the project-configured timezone, converted to UTC. Exported so that
+// dashboard and other callers can reuse the same time-range semantics.
+func CutoffStartUTC(days int) time.Time {
 	return cutoffStartUTCAt(time.Now(), days)
 }
 
@@ -515,7 +536,7 @@ func buildWhereClause(params LogQueryParams) (string, []interface{}) {
 
 	// Time range: days=1 means "today", days=7 means "last 7 days", etc.
 	conditions = append(conditions, "timestamp >= ?")
-	args = append(args, cutoffStartUTC(params.Days).Format(time.RFC3339))
+	args = append(args, CutoffStartUTC(params.Days).Format(time.RFC3339))
 
 	if params.APIKey != "" {
 		conditions = append(conditions, "api_key = ?")
@@ -567,7 +588,7 @@ func QueryModelsForKey(apiKey string, days int) ([]string, error) {
 	if days < 1 {
 		days = 7
 	}
-	cutoff := cutoffStartUTC(days).Format(time.RFC3339)
+	cutoff := CutoffStartUTC(days).Format(time.RFC3339)
 
 	rows, err := db.Query(
 		"SELECT DISTINCT model FROM request_logs WHERE api_key = ? AND timestamp >= ? AND model != '' ORDER BY model",
@@ -800,7 +821,7 @@ func GetChannelAvgLatency(days int) ([]ChannelLatency, error) {
 		return nil, fmt.Errorf("usage: database not initialised")
 	}
 
-	cutoff := time.Now().UTC().AddDate(0, 0, -days)
+	cutoff := CutoffStartUTC(days)
 	rows, err := db.Query(`
 		SELECT source, COUNT(*) as cnt, AVG(latency_ms) as avg_lat
 		FROM request_logs
@@ -834,7 +855,7 @@ func CountTodayByKey(apiKey string) (int64, error) {
 	var count int64
 	err := db.QueryRow(
 		"SELECT COUNT(*) FROM request_logs WHERE api_key = ? AND timestamp >= ?",
-		apiKey, cutoffStartUTC(1).Format(time.RFC3339),
+		apiKey, CutoffStartUTC(1).Format(time.RFC3339),
 	).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("usage: count today: %w", err)
