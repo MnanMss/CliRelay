@@ -323,11 +323,32 @@ func (h *Handler) GetUsageChartData(c *gin.Context) {
 		hourlyModels = []usage.HourlyModelPoint{}
 	}
 
+	// API Key distribution (only when not filtered by a single key)
+	var apikeyDist []usage.APIKeyDistributionPoint
+	if apiKey == "" {
+		apikeyDist, err = usage.QueryAPIKeyDistribution(days)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		// Enrich with display names from config
+		keyNameMap, _ := h.buildNameMaps()
+		for i := range apikeyDist {
+			if name, ok := keyNameMap[apikeyDist[i].APIKey]; ok {
+				apikeyDist[i].Name = name
+			}
+		}
+	}
+	if apikeyDist == nil {
+		apikeyDist = []usage.APIKeyDistributionPoint{}
+	}
+
 	c.JSON(http.StatusOK, gin.H{
-		"daily_series":       daily,
-		"model_distribution": models,
-		"hourly_tokens":      hourlyTokens,
-		"hourly_models":      hourlyModels,
+		"daily_series":        daily,
+		"model_distribution":  models,
+		"hourly_tokens":       hourlyTokens,
+		"hourly_models":       hourlyModels,
+		"apikey_distribution": apikeyDist,
 	})
 }
 

@@ -769,6 +769,51 @@ func QueryModelDistribution(apiKey string, days int) ([]ModelDistributionPoint, 
 	return result, rows.Err()
 }
 
+// APIKeyDistributionPoint holds aggregated usage data for a single API key.
+type APIKeyDistributionPoint struct {
+	APIKey   string `json:"api_key"`
+	Name     string `json:"name"`
+	Requests int64  `json:"requests"`
+	Tokens   int64  `json:"tokens"`
+}
+
+// QueryAPIKeyDistribution returns request count and token usage grouped by api_key.
+func QueryAPIKeyDistribution(days int) ([]APIKeyDistributionPoint, error) {
+	db := getDB()
+	if db == nil {
+		return nil, nil
+	}
+	if days < 1 {
+		days = 7
+	}
+
+	params := LogQueryParams{Days: days}
+	where, args := buildWhereClause(params)
+
+	q := `SELECT api_key,
+	             COUNT(*) as reqs,
+	             COALESCE(SUM(total_tokens),0)
+	      FROM request_logs` + where + `
+	      AND api_key != ''
+	      GROUP BY api_key ORDER BY reqs DESC`
+
+	rows, err := db.Query(q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("usage: apikey distribution query: %w", err)
+	}
+	defer rows.Close()
+
+	var result []APIKeyDistributionPoint
+	for rows.Next() {
+		var p APIKeyDistributionPoint
+		if err := rows.Scan(&p.APIKey, &p.Requests, &p.Tokens); err != nil {
+			return nil, fmt.Errorf("usage: apikey distribution scan: %w", err)
+		}
+		result = append(result, p)
+	}
+	return result, rows.Err()
+}
+
 // GetDBPath returns the file path of the SQLite database, or empty if not initialised.
 func GetDBPath() string {
 	usageDBMu.Lock()
