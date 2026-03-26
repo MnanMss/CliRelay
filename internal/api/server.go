@@ -29,6 +29,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/middleware"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/modules"
 	ampmodule "github.com/router-for-me/CLIProxyAPI/v6/internal/api/modules/amp"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/managementasset"
@@ -239,6 +240,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	}
 
 	engine.Use(corsMiddleware())
+	engine.Use(versionHeaderMiddleware())
 	wd, err := os.Getwd()
 	if err != nil {
 		wd = configFilePath
@@ -1137,6 +1139,19 @@ func corsMiddleware() gin.HandlerFunc {
 			return
 		}
 
+		c.Next()
+	}
+}
+
+// versionHeaderMiddleware returns a Gin middleware handler that adds version
+// headers to every response, allowing the frontend to display the backend version.
+//
+// Returns:
+//   - gin.HandlerFunc: The version header middleware handler
+func versionHeaderMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Header("x-cpa-version", buildinfo.Version)
+		c.Header("x-cpa-build-date", buildinfo.BuildDate)
 		c.Next()
 	}
 }
