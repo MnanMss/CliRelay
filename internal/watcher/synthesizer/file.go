@@ -22,6 +22,22 @@ func NewFileSynthesizer() *FileSynthesizer {
 	return &FileSynthesizer{}
 }
 
+func fileAuthLabel(metadata map[string]any, provider string) string {
+	if metadata != nil {
+		if raw, ok := metadata["label"].(string); ok {
+			if label := strings.TrimSpace(raw); label != "" {
+				return label
+			}
+		}
+		if raw, ok := metadata["email"].(string); ok {
+			if email := strings.TrimSpace(raw); email != "" {
+				return email
+			}
+		}
+	}
+	return strings.TrimSpace(provider)
+}
+
 // Synthesize generates Auth entries from auth files in the auth directory.
 func (s *FileSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth, error) {
 	out := make([]*coreauth.Auth, 0, 16)
@@ -63,10 +79,7 @@ func (s *FileSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth, e
 		if provider == "gemini" {
 			provider = "gemini-cli"
 		}
-		label := provider
-		if email, _ := metadata["email"].(string); email != "" {
-			label = email
-		}
+		label := fileAuthLabel(metadata, provider)
 		// Use relative path under authDir as ID to stay consistent with the file-based token store
 		id := full
 		if rel, errRel := filepath.Rel(ctx.AuthDir, full); errRel == nil && rel != "" {
