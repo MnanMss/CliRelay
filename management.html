@@ -10,6 +10,7 @@
       href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap"
       rel="stylesheet"
     />
+    <!-- 阻塞渲染的主题恢复脚本：在 body 绘制前读取 localStorage 并应用暗色模式 -->
     <script>
       (function () {
         try {
@@ -21,6 +22,7 @@
             document.documentElement.classList.remove("dark");
             document.documentElement.style.colorScheme = "light";
           } else {
+            // 跟随系统偏好
             if (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) {
               document.documentElement.classList.add("dark");
               document.documentElement.style.colorScheme = "dark";
@@ -30,6 +32,7 @@
       })();
     </script>
     <style>
+      /* ── 首屏 loading 样式 ── */
       :root {
         --loading-bg: #f4f4f5;
         --loading-text: #64748b;
@@ -48,11 +51,13 @@
         --loading-glow-2: rgba(45, 212, 191, 0.1);
         --loading-glow-3: rgba(168, 85, 247, 0.1);
       }
+
       body {
         margin: 0;
         background-color: var(--loading-bg);
         transition: background-color 0.3s ease;
       }
+
       #app-loader {
         position: fixed;
         inset: 0;
@@ -73,6 +78,8 @@
         visibility: hidden;
         pointer-events: none;
       }
+
+      /* 背景光晕 */
       .loader-glow {
         position: absolute;
         border-radius: 50%;
@@ -103,6 +110,8 @@
         background: var(--loading-glow-3);
         animation-delay: 2.6s;
       }
+
+      /* 旋转光环 */
       .loader-ring {
         width: 48px;
         height: 48px;
@@ -112,6 +121,8 @@
         animation: ring-spin 0.9s cubic-bezier(0.4, 0, 0.2, 1) infinite;
         margin-bottom: 20px;
       }
+
+      /* 品牌文字 */
       .loader-text {
         font-size: 13px;
         font-weight: 500;
@@ -120,12 +131,15 @@
         animation: text-breathe 2.4s ease-in-out infinite;
         user-select: none;
       }
+
+      /* 容器淡入 */
       .loader-content {
         display: flex;
         flex-direction: column;
         align-items: center;
         animation: content-fade-in 0.6s ease-out;
       }
+
       @keyframes ring-spin {
         to {
           transform: rotate(360deg);
@@ -161,11 +175,16 @@
         }
       }
     </style>
-    <script type="module" crossorigin src="/manage/assets/index-Cnx5FW8z.js"></script>
-    <script type="module" crossorigin src="/manage/assets/main-1v8yGwXu.js"></script>
-    <link rel="stylesheet" crossorigin href="/manage/assets/index-Bvd8bm6V.css">
+    <script type="module" crossorigin src="/manage/assets/manage-WL7l-ZQz.js"></script>
+    <link rel="modulepreload" crossorigin href="/manage/assets/vendor-react-CZWGl9q3.js">
+    <link rel="modulepreload" crossorigin href="/manage/assets/vendor-animation-DeVmnJ2a.js">
+    <link rel="modulepreload" crossorigin href="/manage/assets/vendor-markdown-DvD2vbsG.js">
+    <link rel="modulepreload" crossorigin href="/manage/assets/index-Byn9cpqP.js">
+    <link rel="stylesheet" crossorigin href="/manage/assets/index-CXSCgU4J.css">
   </head>
+
   <body>
+    <!-- 首屏 loading 占位——React 挂载后自动淡出移除 -->
     <div id="app-loader" aria-label="Loading">
       <div class="loader-glow loader-glow-1"></div>
       <div class="loader-glow loader-glow-2"></div>

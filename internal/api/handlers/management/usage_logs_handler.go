@@ -129,6 +129,23 @@ func (h *Handler) GetUsageLogs(c *gin.Context) {
 		filters.Channels = channels
 	}
 
+	// Defensive: ensure JSON arrays are never encoded as null.
+	if result.Items == nil {
+		result.Items = make([]usage.LogRow, 0)
+	}
+	if filters.APIKeys == nil {
+		filters.APIKeys = make([]string, 0)
+	}
+	if filters.Models == nil {
+		filters.Models = make([]string, 0)
+	}
+	if filters.Channels == nil {
+		filters.Channels = make([]string, 0)
+	}
+	if filters.APIKeyNames == nil {
+		filters.APIKeyNames = make(map[string]string)
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"items":   result.Items,
 		"total":   result.Total,
@@ -349,6 +366,9 @@ func (h *Handler) GetPublicUsageLogs(c *gin.Context) {
 
 	// Model filter options (scoped to this api_key via QueryFilters with key filter)
 	models, _ := usage.QueryModelsForKey(apiKey, params.Days)
+	if models == nil {
+		models = make([]string, 0)
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"items": result.Items,

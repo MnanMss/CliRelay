@@ -92,3 +92,108 @@ func TestGetUsageLogsPrefersCurrentAuthChannelNameByAuthIndex(t *testing.T) {
 		t.Fatalf("first_token_ms = %d, want %d", payload.Items[0].FirstTokenMs, 45)
 	}
 }
+
+func TestGetUsageLogs_EmptyDB_DoesNotReturnNullSlices(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "usage.db")
+	if err := usage.InitDB(dbPath, config.RequestLogStorageConfig{}, time.UTC); err != nil {
+		t.Fatalf("InitDB: %v", err)
+	}
+	t.Cleanup(func() {
+		usage.CloseDB()
+		_ = os.Remove(dbPath)
+		_ = os.Remove(dbPath + "-wal")
+		_ = os.Remove(dbPath + "-shm")
+	})
+
+	h := &Handler{
+		cfg: &config.Config{},
+	}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/usage/logs?days=7&page=1&size=50", nil)
+
+	h.GetUsageLogs(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d, body=%s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+
+	var payload struct {
+		Items []any `json:"items"`
+		Filters struct {
+			APIKeys     []string          `json:"api_keys"`
+			APIKeyNames map[string]string `json:"api_key_names"`
+			Models      []string          `json:"models"`
+			Channels    []string          `json:"channels"`
+		} `json:"filters"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+
+	if payload.Items == nil {
+		t.Fatalf("items is null; expected []")
+	}
+	if payload.Filters.APIKeys == nil {
+		t.Fatalf("filters.api_keys is null; expected []")
+	}
+	if payload.Filters.Models == nil {
+		t.Fatalf("filters.models is null; expected []")
+	}
+	if payload.Filters.Channels == nil {
+		t.Fatalf("filters.channels is null; expected []")
+	}
+	if payload.Filters.APIKeyNames == nil {
+		t.Fatalf("filters.api_key_names is null; expected {}")
+	}
+}
+
+func TestGetPublicUsageLogs_EmptyDB_DoesNotReturnNullModels(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "usage.db")
+	if err := usage.InitDB(dbPath, config.RequestLogStorageConfig{}, time.UTC); err != nil {
+		t.Fatalf("InitDB: %v", err)
+	}
+	t.Cleanup(func() {
+		usage.CloseDB()
+		_ = os.Remove(dbPath)
+		_ = os.Remove(dbPath + "-wal")
+		_ = os.Remove(dbPath + "-shm")
+	})
+
+	h := &Handler{
+		cfg: &config.Config{},
+	}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(
+		http.MethodGet,
+		"/v0/management/public/usage/logs?api_key=sk-test&days=7&page=1&size=50",
+		nil,
+	)
+
+	h.GetPublicUsageLogs(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d, body=%s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+
+	var payload struct {
+		Filters struct {
+			Models []string `json:"models"`
+		} `json:"filters"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if payload.Filters.Models == nil {
+		t.Fatalf("filters.models is null; expected []")
+	}
+}

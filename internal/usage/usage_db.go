@@ -328,11 +328,6 @@ func SetTokenUsageCallback(fn func(apiKey string, totalTokens int64)) {
 
 // QueryLogs returns a paginated, filtered list of log entries.
 func QueryLogs(params LogQueryParams) (LogQueryResult, error) {
-	db := getDB()
-	if db == nil {
-		return LogQueryResult{Page: params.Page, Size: params.Size}, nil
-	}
-
 	// Normalise parameters
 	if params.Page < 1 {
 		params.Page = 1
@@ -345,6 +340,17 @@ func QueryLogs(params LogQueryParams) (LogQueryResult, error) {
 	}
 	if params.Days < 1 {
 		params.Days = 7
+	}
+
+	db := getDB()
+	if db == nil {
+		// Never return nil slices in JSON responses (nil slice => null in JSON).
+		return LogQueryResult{
+			Items: make([]LogRow, 0),
+			Total: 0,
+			Page:  params.Page,
+			Size:  params.Size,
+		}, nil
 	}
 
 	where, args := buildWhereClause(params)
@@ -402,12 +408,18 @@ func QueryLogs(params LogQueryParams) (LogQueryResult, error) {
 
 // QueryFilters returns the distinct API keys and models within the time range.
 func QueryFilters(days int) (FilterOptions, error) {
-	db := getDB()
-	if db == nil {
-		return FilterOptions{}, nil
-	}
 	if days < 1 {
 		days = 7
+	}
+	db := getDB()
+	if db == nil {
+		// Ensure stable JSON shape: slices => [] (not null), maps => {} (not null).
+		return FilterOptions{
+			APIKeys:     make([]string, 0),
+			APIKeyNames: make(map[string]string),
+			Models:      make([]string, 0),
+			Channels:    make([]string, 0),
+		}, nil
 	}
 
 	cutoff := CutoffStartUTC(days).Format(time.RFC3339)
@@ -421,7 +433,12 @@ func QueryFilters(days int) (FilterOptions, error) {
 		return FilterOptions{}, err
 	}
 
-	return FilterOptions{APIKeys: keys, Models: models}, nil
+	return FilterOptions{
+		APIKeys:     keys,
+		APIKeyNames: make(map[string]string),
+		Models:      models,
+		Channels:    make([]string, 0),
+	}, nil
 }
 
 // QueryStats returns aggregated statistics over the filtered dataset.
@@ -645,7 +662,7 @@ func queryDistinct(db *sql.DB, column, cutoff string) ([]string, error) {
 	}
 	defer rows.Close()
 
-	var result []string
+	result := make([]string, 0)
 	for rows.Next() {
 		var v string
 		if err := rows.Scan(&v); err != nil {
@@ -662,7 +679,7 @@ func queryDistinct(db *sql.DB, column, cutoff string) ([]string, error) {
 func QueryModelsForKey(apiKey string, days int) ([]string, error) {
 	db := getDB()
 	if db == nil {
-		return nil, nil
+		return make([]string, 0), nil
 	}
 	if days < 1 {
 		days = 7
@@ -678,7 +695,7 @@ func QueryModelsForKey(apiKey string, days int) ([]string, error) {
 	}
 	defer rows.Close()
 
-	var result []string
+	result := make([]string, 0)
 	for rows.Next() {
 		var v string
 		if err := rows.Scan(&v); err != nil {
