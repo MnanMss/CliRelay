@@ -60,6 +60,10 @@ api-keys:
   - "your-api-key-2"
   - "your-api-key-3"
 
+# When true, allow /v1 and /v1beta requests without API keys when no keys/providers
+# are configured. Not recommended for production.
+allow-unauthenticated: false
+
 # Enable debug logging
 debug: false
 

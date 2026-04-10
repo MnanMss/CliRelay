@@ -250,7 +250,9 @@ cp config.example.yaml config.yaml
 go build -o cli-proxy-api ./cmd/server
 ```
 
-Edit `config.yaml` to add your API keys or OAuth credentials.
+Edit `config.yaml` to add your API keys or OAuth credentials. By default, client API routes
+(`/v1`, `/v1beta`) require an API key. To run without client keys, set `allow-unauthenticated: true`
+(not recommended for production).
 
 ### 2️⃣ Run
 

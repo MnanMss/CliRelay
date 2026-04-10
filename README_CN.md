@@ -250,7 +250,9 @@ cp config.example.yaml config.yaml
 go build -o cli-proxy-api ./cmd/server
 ```
 
-编辑 `config.yaml` 添加你的 API 密钥或 OAuth 凭据。
+编辑 `config.yaml` 添加你的 API 密钥或 OAuth 凭据。默认情况下，客户端 API 路由（`/v1`、`/v1beta`）
+需要 API Key；如需在未配置 client key 的情况下运行，可设置 `allow-unauthenticated: true`
+（生产环境不推荐）。
 
 ### 2️⃣ 运行
 

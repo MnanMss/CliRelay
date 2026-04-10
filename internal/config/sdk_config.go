@@ -23,6 +23,11 @@ type SDKConfig struct {
 	// APIKeys is a list of keys for authenticating clients to this proxy server.
 	APIKeys []string `yaml:"api-keys" json:"api-keys"`
 
+	// AllowUnauthenticated controls whether client API requests are allowed when
+	// no authentication providers (API keys) are configured. Default is false
+	// (secure-by-default).
+	AllowUnauthenticated bool `yaml:"allow-unauthenticated" json:"allow-unauthenticated"`
+
 	// APIKeyEntries is a list of API key entries with metadata for advanced management.
 	// Keys from both APIKeys and APIKeyEntries are valid for authentication.
 	APIKeyEntries []APIKeyEntry `yaml:"api-key-entries,omitempty" json:"api-key-entries,omitempty"`

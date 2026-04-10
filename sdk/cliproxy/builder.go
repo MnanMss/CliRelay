@@ -13,6 +13,7 @@ import (
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
+	log "github.com/sirupsen/logrus"
 )
 
 // Builder constructs a Service instance with customizable providers.
@@ -195,6 +196,10 @@ func (b *Builder) Build() (*Service, error) {
 	accessManager := b.accessManager
 	if accessManager == nil {
 		accessManager = sdkaccess.NewManager()
+	}
+	accessManager.SetAllowAllWhenNoProviders(b.cfg.SDKConfig.AllowUnauthenticated)
+	if b.cfg.SDKConfig.AllowUnauthenticated {
+		log.Warn("security warning: allow-unauthenticated is enabled; /v1 and /v1beta will be publicly accessible when no API keys are configured")
 	}
 
 	configaccess.Register(&b.cfg.SDKConfig)
