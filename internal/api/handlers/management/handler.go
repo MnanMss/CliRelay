@@ -53,6 +53,13 @@ type Handler struct {
 	attemptCleanupStop  chan struct{}
 	attemptCleanupOnce  sync.Once
 	accessManager       *sdkaccess.Manager
+	trendCacheMu        sync.Mutex
+	trendCache          map[string]trendCacheEntry
+}
+
+type trendCacheEntry struct {
+	expiresAt time.Time
+	payload   any
 }
 
 // NewHandler creates a new management handler instance.
@@ -71,6 +78,7 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 		envSecret:           envSecret,
 		startTime:           time.Now(),
 		attemptCleanupStop:  make(chan struct{}),
+		trendCache:          make(map[string]trendCacheEntry),
 	}
 	h.startAttemptCleanup()
 	return h

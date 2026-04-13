@@ -152,6 +152,86 @@ func TestGetUsageLogs_EmptyDB_DoesNotReturnNullSlices(t *testing.T) {
 	}
 }
 
+func TestGetAuthFileGroupTrendAggregatesByProvider(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "usage.db")
+	if err := usage.InitDB(dbPath, config.RequestLogStorageConfig{}, time.UTC); err != nil {
+		t.Fatalf("InitDB: %v", err)
+	}
+	t.Cleanup(func() {
+		usage.CloseDB()
+		_ = os.Remove(dbPath)
+		_ = os.Remove(dbPath + "-wal")
+		_ = os.Remove(dbPath + "-shm")
+	})
+
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	codexAuth, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "codex-auth-trend",
+		FileName: "codex.json",
+		Provider: "codex",
+		Label:    "GptPlus1",
+	})
+	if err != nil {
+		t.Fatalf("register codex auth: %v", err)
+	}
+	otherAuth, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "kimi-auth-trend",
+		FileName: "kimi.json",
+		Provider: "kimi",
+		Label:    "Kimi",
+	})
+	if err != nil {
+		t.Fatalf("register kimi auth: %v", err)
+	}
+
+	now := time.Now().UTC()
+	usage.InsertLog(
+		"", "", "gpt-5.4", "codex-source", "GptPlus1", codexAuth.Index,
+		false, now, 1, 1, usage.TokenStats{TotalTokens: 1}, "", "",
+	)
+	usage.InsertLog(
+		"", "", "kimi-k2.5", "kimi-source", "Kimi", otherAuth.Index,
+		false, now, 1, 1, usage.TokenStats{TotalTokens: 1}, "", "",
+	)
+
+	h := &Handler{cfg: &config.Config{}, authManager: manager}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/usage/auth-file-group-trend?group=codex&days=7", nil)
+
+	h.GetAuthFileGroupTrend(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d, body=%s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+
+	var payload struct {
+		Group  string `json:"group"`
+		Points []struct {
+			Date     string `json:"date"`
+			Requests int64  `json:"requests"`
+		} `json:"points"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if payload.Group != "codex" {
+		t.Fatalf("group = %q, want codex", payload.Group)
+	}
+	var total int64
+	for _, point := range payload.Points {
+		total += point.Requests
+	}
+	if total != 1 {
+		t.Fatalf("total codex requests = %d, want 1", total)
+	}
+}
+
 func TestGetPublicUsageLogs_EmptyDB_DoesNotReturnNullModels(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

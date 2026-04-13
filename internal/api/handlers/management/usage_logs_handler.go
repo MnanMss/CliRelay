@@ -5,10 +5,19 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 )
+
+const authFileGroupTrendCacheTTL = 30 * time.Second
+
+type authFileGroupTrendResponse struct {
+	Days   int                     `json:"days"`
+	Group  string                  `json:"group"`
+	Points []usage.DailyCountPoint `json:"points"`
+}
 
 // GetUsageLogs returns paginated, filterable request log entries from SQLite.
 // It enriches each log item with resolved api_key_name and channel_name
@@ -583,4 +592,91 @@ func (h *Handler) GetEntityUsageStats(c *gin.Context) {
 		"source":     sourceStats,
 		"auth_index": authIndexStats,
 	})
+}
+
+func (h *Handler) GetAuthFileGroupTrend(c *gin.Context) {
+	group := strings.ToLower(strings.TrimSpace(c.Query("group")))
+	if group == "" {
+		group = "all"
+	}
+	days := intQueryDefault(c, "days", 7)
+	if days > 7 {
+		days = 7
+	}
+
+	cacheKey := group + ":" + strconv.Itoa(days)
+	if cached, ok := h.getTrendCache(cacheKey); ok {
+		c.JSON(http.StatusOK, cached)
+		return
+	}
+
+	authIndexes := h.authIndexesForProviderGroup(group)
+	points, err := usage.QueryDailyCallsByAuthIndexes(authIndexes, days)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if points == nil {
+		points = []usage.DailyCountPoint{}
+	}
+	payload := authFileGroupTrendResponse{Days: days, Group: group, Points: points}
+	h.setTrendCache(cacheKey, payload)
+	c.JSON(http.StatusOK, payload)
+}
+
+func (h *Handler) authIndexesForProviderGroup(group string) []string {
+	if h == nil || h.authManager == nil {
+		return []string{}
+	}
+	auths := h.authManager.List()
+	indexes := make([]string, 0, len(auths))
+	for _, auth := range auths {
+		if auth == nil {
+			continue
+		}
+		provider := strings.ToLower(strings.TrimSpace(auth.Provider))
+		if group != "all" && provider != group {
+			continue
+		}
+		auth.EnsureIndex()
+		if idx := strings.TrimSpace(auth.Index); idx != "" {
+			indexes = append(indexes, idx)
+		}
+	}
+	return indexes
+}
+
+func (h *Handler) getTrendCache(key string) (authFileGroupTrendResponse, bool) {
+	if h == nil {
+		return authFileGroupTrendResponse{}, false
+	}
+	h.trendCacheMu.Lock()
+	defer h.trendCacheMu.Unlock()
+	entry, ok := h.trendCache[key]
+	if !ok || time.Now().After(entry.expiresAt) {
+		if ok {
+			delete(h.trendCache, key)
+		}
+		return authFileGroupTrendResponse{}, false
+	}
+	payload, ok := entry.payload.(authFileGroupTrendResponse)
+	return payload, ok
+}
+
+func (h *Handler) setTrendCache(key string, payload authFileGroupTrendResponse) {
+	if h == nil {
+		return
+	}
+	h.trendCacheMu.Lock()
+	defer h.trendCacheMu.Unlock()
+	if h.trendCache == nil {
+		h.trendCache = make(map[string]trendCacheEntry)
+	}
+	now := time.Now()
+	for k, entry := range h.trendCache {
+		if now.After(entry.expiresAt) {
+			delete(h.trendCache, k)
+		}
+	}
+	h.trendCache[key] = trendCacheEntry{expiresAt: now.Add(authFileGroupTrendCacheTTL), payload: payload}
 }

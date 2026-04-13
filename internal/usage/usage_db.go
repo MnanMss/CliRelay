@@ -70,6 +70,11 @@ type LogStats struct {
 	TotalCost   float64 `json:"total_cost"`
 }
 
+type DailyCountPoint struct {
+	Date     string `json:"date"`
+	Requests int64  `json:"requests"`
+}
+
 var (
 	usageDB     *sql.DB
 	usageDBMu   sync.Mutex
@@ -1157,6 +1162,67 @@ func QueryEntityStats(apiKey string, days int, groupColumn string) ([]EntityStat
 			return nil, fmt.Errorf("usage: entity stats scan: %w", err)
 		}
 		result = append(result, p)
+	}
+	return result, rows.Err()
+}
+
+func QueryDailyCallsByAuthIndexes(authIndexes []string, days int) ([]DailyCountPoint, error) {
+	db := getDB()
+	if db == nil {
+		return []DailyCountPoint{}, nil
+	}
+	if days < 1 {
+		days = 7
+	}
+	if len(authIndexes) == 0 {
+		return []DailyCountPoint{}, nil
+	}
+
+	seen := make(map[string]struct{}, len(authIndexes))
+	normalized := make([]string, 0, len(authIndexes))
+	for _, idx := range authIndexes {
+		idx = strings.TrimSpace(idx)
+		if idx == "" {
+			continue
+		}
+		if _, ok := seen[idx]; ok {
+			continue
+		}
+		seen[idx] = struct{}{}
+		normalized = append(normalized, idx)
+	}
+	if len(normalized) == 0 {
+		return []DailyCountPoint{}, nil
+	}
+
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(normalized)), ",")
+	args := make([]interface{}, 0, len(normalized)+1)
+	args = append(args, CutoffStartUTC(days).Format(time.RFC3339))
+	for _, idx := range normalized {
+		args = append(args, idx)
+	}
+
+	q := fmt.Sprintf(`
+		SELECT substr(timestamp, 1, 10) AS day_key, COUNT(*)
+		FROM request_logs
+		WHERE timestamp >= ? AND auth_index IN (%s)
+		GROUP BY day_key
+		ORDER BY day_key ASC
+	`, placeholders)
+
+	rows, err := db.Query(q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("usage: daily calls by auth indexes query: %w", err)
+	}
+	defer rows.Close()
+
+	result := make([]DailyCountPoint, 0, days)
+	for rows.Next() {
+		var point DailyCountPoint
+		if err := rows.Scan(&point.Date, &point.Requests); err != nil {
+			return nil, fmt.Errorf("usage: daily calls by auth indexes scan: %w", err)
+		}
+		result = append(result, point)
 	}
 	return result, rows.Err()
 }
