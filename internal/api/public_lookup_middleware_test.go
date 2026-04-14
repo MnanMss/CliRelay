@@ -70,3 +70,47 @@ func TestPublicLookupRateLimitMiddlewareRejectsBurst(t *testing.T) {
 		t.Fatal("Retry-After header missing")
 	}
 }
+
+func TestPublicLookupRateLimitMiddlewareKeepsFailureResponseStable(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := &Server{}
+	router := gin.New()
+	router.Use(publicLookupNoStoreMiddleware(), server.publicLookupRateLimitMiddleware())
+	router.POST("/v0/management/public/test", func(c *gin.Context) {
+		c.Status(http.StatusNoContent)
+	})
+
+	for i := 0; i < publicLookupRateLimitMaxRequests; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/v0/management/public/test", nil)
+		req.RemoteAddr = "198.51.100.30:9876"
+		req.Header.Set("User-Agent", "public-lookup-test")
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNoContent {
+			t.Fatalf("request %d status = %d, want %d", i+1, rec.Code, http.StatusNoContent)
+		}
+	}
+
+	firstReject := httptest.NewRecorder()
+	firstReq := httptest.NewRequest(http.MethodPost, "/v0/management/public/test", nil)
+	firstReq.RemoteAddr = "198.51.100.30:9876"
+	firstReq.Header.Set("User-Agent", "public-lookup-test")
+	router.ServeHTTP(firstReject, firstReq)
+
+	secondReject := httptest.NewRecorder()
+	secondReq := httptest.NewRequest(http.MethodPost, "/v0/management/public/test", nil)
+	secondReq.RemoteAddr = "198.51.100.30:9876"
+	secondReq.Header.Set("User-Agent", "public-lookup-test")
+	router.ServeHTTP(secondReject, secondReq)
+
+	if firstReject.Code != http.StatusTooManyRequests || secondReject.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected repeated rejections to return 429, got %d and %d", firstReject.Code, secondReject.Code)
+	}
+	if firstReject.Body.String() != secondReject.Body.String() {
+		t.Fatalf("expected stable rejection body, got %q and %q", firstReject.Body.String(), secondReject.Body.String())
+	}
+	if firstReject.Header().Get("Retry-After") == "" || secondReject.Header().Get("Retry-After") == "" {
+		t.Fatal("Retry-After header missing on repeated rejection")
+	}
+}
