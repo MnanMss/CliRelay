@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"html"
-	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -183,7 +182,7 @@ func (g *GeminiAuth) createTokenStorage(ctx context.Context, config *oauth2.Conf
 		}
 	}()
 
-	bodyBytes, _ := io.ReadAll(resp.Body)
+	bodyBytes, _ := util.ReadHTTPResponseBody("gemini-oauth", resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("get user info request failed with status %d: %s", resp.StatusCode, string(bodyBytes))
 	}

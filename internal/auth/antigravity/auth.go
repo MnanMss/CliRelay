@@ -200,7 +200,7 @@ func (o *AntigravityAuth) FetchProjectID(ctx context.Context, accessToken string
 		}
 	}()
 
-	bodyBytes, errRead := io.ReadAll(resp.Body)
+	bodyBytes, errRead := util.ReadHTTPResponseBody("antigravity-oauth", resp.Body)
 	if errRead != nil {
 		return "", fmt.Errorf("read response: %w", errRead)
 	}
@@ -300,7 +300,7 @@ func (o *AntigravityAuth) OnboardUser(ctx context.Context, accessToken, tierID s
 			return "", fmt.Errorf("execute request: %w", errDo)
 		}
 
-		bodyBytes, errRead := io.ReadAll(resp.Body)
+		bodyBytes, errRead := util.ReadHTTPResponseBody("antigravity-oauth", resp.Body)
 		if errClose := resp.Body.Close(); errClose != nil {
 			log.Errorf("close body error: %v", errClose)
 		}

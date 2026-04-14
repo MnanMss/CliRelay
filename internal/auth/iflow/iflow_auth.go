@@ -118,7 +118,7 @@ func (ia *IFlowAuth) doTokenRequest(ctx context.Context, req *http.Request) (*IF
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := util.ReadHTTPResponseBody("iflow-oauth", resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("iflow token: read response failed: %w", err)
 	}
@@ -185,7 +185,7 @@ func (ia *IFlowAuth) FetchUserInfo(ctx context.Context, accessToken string) (*us
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := util.ReadHTTPResponseBody("iflow-oauth", resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("iflow api key: read response failed: %w", err)
 	}

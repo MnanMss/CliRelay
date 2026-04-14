@@ -8,7 +8,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -111,7 +110,7 @@ func (o *CodexAuth) ExchangeCodeForTokensWithRedirect(ctx context.Context, code,
 		_ = resp.Body.Close()
 	}()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := util.ReadHTTPResponseBody("codex-oauth", resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read token response: %w", err)
 	}
@@ -197,7 +196,7 @@ func (o *CodexAuth) RefreshTokens(ctx context.Context, refreshToken string) (*Co
 		_ = resp.Body.Close()
 	}()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := util.ReadHTTPResponseBody("codex-oauth", resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read refresh response: %w", err)
 	}

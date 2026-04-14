@@ -7,7 +7,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -139,7 +138,7 @@ func (qa *QwenAuth) RefreshTokens(ctx context.Context, refreshToken string) (*Qw
 		_ = resp.Body.Close()
 	}()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := util.ReadHTTPResponseBody("qwen-oauth", resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response body: %w", err)
 	}
@@ -198,7 +197,7 @@ func (qa *QwenAuth) InitiateDeviceFlow(ctx context.Context) (*DeviceFlow, error)
 		_ = resp.Body.Close()
 	}()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := util.ReadHTTPResponseBody("qwen-oauth", resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response body: %w", err)
 	}
@@ -242,7 +241,7 @@ func (qa *QwenAuth) PollForToken(deviceCode, codeVerifier string) (*QwenTokenDat
 			continue
 		}
 
-		body, err := io.ReadAll(resp.Body)
+		body, err := util.ReadHTTPResponseBody("qwen-oauth", resp.Body)
 		_ = resp.Body.Close()
 		if err != nil {
 			fmt.Printf("Polling attempt %d/%d failed: %v\n", attempt+1, maxAttempts, err)
