@@ -273,6 +273,8 @@ func (w *Watcher) persistConfigAsync() {
 	if w == nil || w.storePersister == nil {
 		return
 	}
+	// Persistence is intentionally detached from fsnotify handling so file events
+	// do not block. The goroutine owns a short timeout context and cleans itself up.
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -295,6 +297,8 @@ func (w *Watcher) persistAuthAsync(message string, paths ...string) {
 	if len(filtered) == 0 {
 		return
 	}
+	// Persistence is intentionally detached from fsnotify handling so file events
+	// do not block. The goroutine owns a short timeout context and cleans itself up.
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()

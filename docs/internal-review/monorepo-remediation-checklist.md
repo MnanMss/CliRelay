@@ -22,17 +22,17 @@
 
 ## Phase 1：前端结构治理
 
-- [ ] 将 `codeProxy/src/modules/auth-files/AuthFilesPage.tsx` 拆分为路由容器、文件列表、筛选分页、Quota 概览、OAuth 流程、弹窗组件、hooks、helpers、types、constants，主页面文件降到 600 行以内。完成时间：待填写
+- [x] 将 `codeProxy/src/modules/auth-files/AuthFilesPage.tsx` 拆分为路由容器、文件列表、筛选分页、Quota 概览、OAuth 流程、弹窗组件、hooks、helpers、types、constants，主页面文件降到 600 行以内。完成时间：2026-04-14 10:41:09 +0800
 - [ ] 为 Auth Files 拆分后的 quota 聚合、文件筛选、sessionStorage 缓存读写、OAuth 状态转换补单测。完成时间：待填写
-- [ ] 将 `codeProxy/src/modules/providers/ProvidersPage.tsx` 拆分为 Provider tabs、Provider key 卡片、OpenAI provider 表单、Ampcode 配置、模型发现、状态栏 hooks，主页面文件降到 600 行以内。完成时间：待填写
+- [x] 将 `codeProxy/src/modules/providers/ProvidersPage.tsx` 拆分为 Provider key 卡片、OpenAI provider 列表/表单、Ampcode 配置、模型发现与状态栏 hooks，主页面文件降到 600 行以内。完成时间：2026-04-13 20:28:39 +0800
 - [ ] 为 Providers 拆分后的 provider draft、model discovery、usage source 归一化、API key masking 补单测。完成时间：待填写
 - [ ] 将 `codeProxy/src/modules/api-keys/ApiKeysPage.tsx` 拆分为 key 表格、编辑弹窗、权限/限制选择器、日志快捷入口、配额展示 hooks，主页面文件降到 600 行以内。完成时间：待填写
-- [ ] 将 `codeProxy/src/modules/config/ConfigPage.tsx` 和 `codeProxy/src/modules/config/visual/VisualConfigEditor.tsx` 拆分为 source editor、runtime panel、visual editor sections、保存流程 hooks。完成时间：待填写
-- [ ] 将 `codeProxy/src/modules/apikey-lookup/ApiKeyLookupPage.tsx` 拆分为公开查询表单、KPI、图表、请求日志表、数据加载 hooks。完成时间：待填写
+- [x] 将 `codeProxy/src/modules/config/ConfigPage.tsx` 和 `codeProxy/src/modules/config/visual/VisualConfigEditor.tsx` 拆分为 source editor、runtime panel、visual editor sections、保存流程 hooks。完成时间：2026-04-13 22:50:01 +0800
+- [x] 将 `codeProxy/src/modules/apikey-lookup/ApiKeyLookupPage.tsx` 拆分为公开查询表单、KPI、图表、请求日志表、数据加载 hooks。完成时间：2026-04-14 07:57:59 +0800
 - [x] 将 `codeProxy/src/modules/monitor/LogContentModal.tsx` 拆分为内容加载 hook、Markdown/XML 渲染组件、复制导出组件、输入/输出 tab 状态。完成时间：2026-04-13 15:38:53 +0800
-- [ ] 将 `codeProxy/src/modules/monitor/MonitorPage.tsx` 拆分为 KPI 区、模型分布图、小时序列图、API Key 分布图、查询参数 hooks。完成时间：待填写
-- [ ] 将 `codeProxy/src/modules/logs/LogsPage.tsx` 拆分为日志工具栏、日志表格、下载流程、错误日志列表和 hooks。完成时间：待填写
-- [ ] 将 `codeProxy/src/utils/usage.ts` 拆分为 `sanitize`、`pricing`、`aggregation`、`chart-series`、`formatters` 等独立工具模块，并补纯函数单测。完成时间：待填写
+- [x] 将 `codeProxy/src/modules/monitor/MonitorPage.tsx` 拆分为 KPI 区、模型分布图、小时序列图、API Key 分布图、查询参数 hooks。完成时间：2026-04-14 09:41:42 +0800
+- [x] 将 `codeProxy/src/modules/logs/LogsPage.tsx` 拆分为日志工具栏、日志表格、下载流程、错误日志列表和 hooks。完成时间：2026-04-14 09:31:06 +0800
+- [x] 将 `codeProxy/src/utils/usage.ts` 拆分为 `sanitize`、`pricing`、`aggregation/details`、`chart-series`、`status`、`formatters` 等独立工具模块，并补纯函数单测。完成时间：2026-04-14 09:20:05 +0800
 - [ ] 将 `codeProxy/src/modules/quota/quota-helpers.ts` 拆分为 provider 识别、配额映射、显示格式化和校验函数，并补单测。完成时间：待填写
 - [x] 清理遗留 `useApi`、`useModelsStore`、`useConfigStore`、`useAuthStore` 与旧 `services/api` 的未使用路径，避免继续形成双轨架构。完成时间：2026-04-13 14:45:34 +0800
 
@@ -72,7 +72,7 @@
 - [x] 为 auth 文件下载增加高敏确认提示，提示该操作会把完整凭据带入浏览器环境。完成时间：2026-04-13 15:19:36 +0800
 - [x] 收敛重复 API 契约类型，删除或迁移旧 `src/types/*` 中与 `src/lib/http/types.ts` 重叠的定义。完成时间：2026-04-13 14:45:34 +0800
 - [ ] 为前端构建增加 bundle size 输出对比，超过预算时在 CI 或检查脚本中提示。完成时间：待填写
-- [ ] 建立页面级 chunk 预算，并跟踪 `AuthFilesPage`、`ConfigPage`、`ProvidersPage`、`LogContentModal` 的拆分收益。完成时间：待填写
+- [x] 建立页面级 chunk 预算，并跟踪 `AuthFilesPage`、`ConfigPage`、`ProvidersPage`、`LogContentModal` 的拆分收益。完成时间：2026-04-14 09:41:42 +0800
 
 ## Phase 4：后端安全与稳定性治理
 

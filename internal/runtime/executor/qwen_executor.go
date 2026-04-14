@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -287,7 +286,7 @@ func (e *QwenExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	}()
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
+		b := readUpstreamErrorBody(e.Identifier(), httpResp.Body)
 		appendAPIResponseChunk(ctx, e.cfg, b)
 
 		errCode, retryAfter := wrapQwenError(ctx, httpResp.StatusCode, b)
@@ -296,7 +295,7 @@ func (e *QwenExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 		err = statusErr{code: errCode, msg: string(b), retryAfter: retryAfter}
 		return resp, err
 	}
-	data, err := io.ReadAll(httpResp.Body)
+	data, err := readUpstreamResponseBody(e.Identifier(), httpResp.Body)
 	if err != nil {
 		recordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
@@ -394,7 +393,7 @@ func (e *QwenExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	}
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
+		b := readUpstreamErrorBody(e.Identifier(), httpResp.Body)
 		appendAPIResponseChunk(ctx, e.cfg, b)
 
 		errCode, retryAfter := wrapQwenError(ctx, httpResp.StatusCode, b)

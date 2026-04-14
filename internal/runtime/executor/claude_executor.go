@@ -178,7 +178,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	}
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
+		b := readUpstreamErrorBody(e.Identifier(), httpResp.Body)
 		appendAPIResponseChunk(ctx, e.cfg, b)
 		logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
 		reporter.publishFailureWithContent(ctx, string(req.Payload), string(b))
@@ -201,7 +201,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 			log.Errorf("response body close error: %v", errClose)
 		}
 	}()
-	data, err := io.ReadAll(decodedBody)
+	data, err := readUpstreamResponseBody(e.Identifier(), decodedBody)
 	if err != nil {
 		recordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
@@ -327,7 +327,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	}
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
+		b := readUpstreamErrorBody(e.Identifier(), httpResp.Body)
 		appendAPIResponseChunk(ctx, e.cfg, b)
 		logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
 		reporter.publishFailureWithContent(ctx, string(req.Payload), string(b))
@@ -478,7 +478,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	}
 	recordAPIResponseMetadata(ctx, e.cfg, resp.StatusCode, resp.Header.Clone())
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		b, _ := io.ReadAll(resp.Body)
+		b := readUpstreamErrorBody(e.Identifier(), resp.Body)
 		appendAPIResponseChunk(ctx, e.cfg, b)
 		if errClose := resp.Body.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
@@ -498,7 +498,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 			log.Errorf("response body close error: %v", errClose)
 		}
 	}()
-	data, err := io.ReadAll(decodedBody)
+	data, err := readUpstreamResponseBody(e.Identifier(), decodedBody)
 	if err != nil {
 		recordAPIResponseError(ctx, e.cfg, err)
 		return cliproxyexecutor.Response{}, err

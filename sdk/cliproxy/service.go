@@ -75,6 +75,9 @@ type Service struct {
 	// authQueueStop cancels the auth update queue processing.
 	authQueueStop context.CancelFunc
 
+	// authQueueWG waits for the service-owned auth update queue goroutine.
+	authQueueWG sync.WaitGroup
+
 	// authManager handles legacy authentication operations.
 	authManager *sdkAuth.Manager
 
@@ -123,7 +126,11 @@ func (s *Service) ensureAuthUpdateQueue(ctx context.Context) {
 	}
 	queueCtx, cancel := context.WithCancel(ctx)
 	s.authQueueStop = cancel
-	go s.consumeAuthUpdates(queueCtx)
+	s.authQueueWG.Add(1)
+	go func() {
+		defer s.authQueueWG.Done()
+		s.consumeAuthUpdates(queueCtx)
+	}()
 }
 
 func (s *Service) consumeAuthUpdates(ctx context.Context) {
@@ -527,6 +534,8 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 
 	s.serverErr = make(chan error, 1)
+	// Service owns this server goroutine. The buffered channel lets it exit
+	// even when Shutdown stops the HTTP server before Start observes serverErr.
 	go func() {
 		if errStart := s.server.Start(); errStart != nil {
 			s.serverErr <- errStart
@@ -610,7 +619,9 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 	watcherWrapper.SetConfig(s.cfg)
 
-	watcherCtx, watcherCancel := context.WithCancel(context.Background())
+	// Service owns the watcher context and cancels it from Shutdown or when the
+	// parent Start context is cancelled.
+	watcherCtx, watcherCancel := context.WithCancel(ctx)
 	s.watcherCancel = watcherCancel
 	if err = watcherWrapper.Start(watcherCtx); err != nil {
 		return fmt.Errorf("cliproxy: failed to start watcher: %w", err)
@@ -676,6 +687,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		}
 		if s.authQueueStop != nil {
 			s.authQueueStop()
+			s.authQueueWG.Wait()
 			s.authQueueStop = nil
 		}
 

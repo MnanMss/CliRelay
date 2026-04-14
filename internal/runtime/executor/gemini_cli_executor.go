@@ -9,7 +9,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -117,7 +116,7 @@ func (e *GeminiCLIExecutor) ProbeQuotaRecovery(ctx context.Context, auth *clipro
 		}
 	}()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readUpstreamResponseBody(e.Identifier(), resp.Body)
 	if err != nil {
 		return nil, err
 	}
@@ -252,7 +251,7 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 			return resp, err
 		}
 
-		data, errRead := io.ReadAll(httpResp.Body)
+		data, errRead := readUpstreamResponseBody(e.Identifier(), httpResp.Body)
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("gemini cli executor: close response body error: %v", errClose)
 		}
@@ -400,7 +399,7 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 		}
 		recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 		if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-			data, errRead := io.ReadAll(httpResp.Body)
+			data, errRead := readUpstreamResponseBody(e.Identifier(), httpResp.Body)
 			if errClose := httpResp.Body.Close(); errClose != nil {
 				log.Errorf("gemini cli executor: close response body error: %v", errClose)
 			}
@@ -464,7 +463,7 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 				return
 			}
 
-			data, errRead := io.ReadAll(resp.Body)
+			data, errRead := readUpstreamResponseBody(e.Identifier(), resp.Body)
 			if errRead != nil {
 				recordAPIResponseError(ctx, e.cfg, errRead)
 				reporter.publishFailure(ctx)
@@ -580,7 +579,7 @@ func (e *GeminiCLIExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.
 			recordAPIResponseError(ctx, e.cfg, errDo)
 			return cliproxyexecutor.Response{}, errDo
 		}
-		data, errRead := io.ReadAll(resp.Body)
+		data, errRead := readUpstreamResponseBody(e.Identifier(), resp.Body)
 		_ = resp.Body.Close()
 		recordAPIResponseMetadata(ctx, e.cfg, resp.StatusCode, resp.Header.Clone())
 		if errRead != nil {

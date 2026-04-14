@@ -33,6 +33,8 @@ func (w *Watcher) setAuthUpdateQueue(queue chan<- AuthUpdate) {
 	if queue != nil {
 		ctx, cancel := context.WithCancel(context.Background())
 		w.dispatchCancel = cancel
+		// The watcher owns this dispatch loop and stops it through dispatchCancel
+		// whenever the queue is replaced or the watcher shuts down.
 		go w.dispatchLoop(ctx)
 	}
 }

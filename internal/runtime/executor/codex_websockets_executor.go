@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -1000,7 +999,7 @@ func websocketHandshakeBody(resp *http.Response) []byte {
 	if resp == nil || resp.Body == nil {
 		return nil
 	}
-	body, _ := io.ReadAll(resp.Body)
+	body := readUpstreamErrorBody("codex-websocket", resp.Body)
 	closeHTTPResponseBody(resp, "codex websockets executor: close handshake response body error")
 	if len(body) == 0 {
 		return nil

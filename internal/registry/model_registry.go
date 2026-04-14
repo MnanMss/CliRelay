@@ -170,6 +170,8 @@ func (r *ModelRegistry) triggerModelsRegistered(provider, clientID string, model
 		return
 	}
 	modelsCopy := cloneModelInfosUnique(models)
+	// Registry hooks are intentionally detached from caller mutation paths.
+	// Each invocation owns its own timeout-bounded context and self-cleans on return.
 	go func() {
 		defer func() {
 			if recovered := recover(); recovered != nil {
@@ -187,6 +189,8 @@ func (r *ModelRegistry) triggerModelsUnregistered(provider, clientID string) {
 	if hook == nil {
 		return
 	}
+	// Registry hooks are intentionally detached from caller mutation paths.
+	// Each invocation owns its own timeout-bounded context and self-cleans on return.
 	go func() {
 		defer func() {
 			if recovered := recover(); recovered != nil {

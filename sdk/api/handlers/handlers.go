@@ -25,6 +25,7 @@ import (
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
+	"github.com/tidwall/gjson"
 )
 
 // ErrorResponse represents a standard error response format for the API.
@@ -349,6 +350,59 @@ func (h *BaseAPIHandler) GetAlt(c *gin.Context) string {
 	return alt
 }
 
+func requestContextFromGin(c *gin.Context) context.Context {
+	if c != nil && c.Request != nil {
+		if requestCtx := c.Request.Context(); requestCtx != nil {
+			return requestCtx
+		}
+	}
+	return nil
+}
+
+func requestContextOrBackground(c *gin.Context) context.Context {
+	if requestCtx := requestContextFromGin(c); requestCtx != nil {
+		return requestCtx
+	}
+	return context.Background()
+}
+
+func requestNeedsWriteTimeoutBypass(c *gin.Context) bool {
+	if c == nil || c.Request == nil {
+		return false
+	}
+	req := c.Request
+	if strings.EqualFold(strings.TrimSpace(req.Header.Get("Upgrade")), "websocket") {
+		return true
+	}
+	accept := strings.ToLower(strings.TrimSpace(req.Header.Get("Accept")))
+	if strings.Contains(accept, "text/event-stream") {
+		return true
+	}
+	if alt, ok := c.GetQuery("alt"); ok && strings.EqualFold(strings.TrimSpace(alt), "sse") {
+		return true
+	}
+	if alt, ok := c.GetQuery("$alt"); ok && strings.EqualFold(strings.TrimSpace(alt), "sse") {
+		return true
+	}
+	switch req.Method {
+	case http.MethodPost, http.MethodPut, http.MethodPatch:
+	default:
+		return false
+	}
+	body, err := bodyutil.ReadRequestBody(c, bodyutil.DefaultRequestBodyLimit)
+	if err != nil || len(body) == 0 {
+		return false
+	}
+	return gjson.GetBytes(body, "stream").Bool()
+}
+
+func clearWriteDeadlineForLongLivedRequest(c *gin.Context) {
+	if !requestNeedsWriteTimeoutBypass(c) || c == nil || c.Writer == nil {
+		return
+	}
+	_ = http.NewResponseController(c.Writer).SetWriteDeadline(time.Time{})
+}
+
 // GetContextWithCancel creates a new context with cancellation capabilities.
 // It embeds the Gin context and the API handler into the new context for later use.
 // The returned cancel function also handles logging the API response if request logging is enabled.
@@ -362,15 +416,16 @@ func (h *BaseAPIHandler) GetAlt(c *gin.Context) string {
 //   - context.Context: The new context with cancellation and embedded values.
 //   - APIHandlerCancelFunc: A function to cancel the context and log the response.
 func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *gin.Context, ctx context.Context) (context.Context, APIHandlerCancelFunc) {
+	requestCtx := requestContextFromGin(c)
 	parentCtx := ctx
 	if parentCtx == nil {
-		parentCtx = context.Background()
+		if requestCtx != nil {
+			parentCtx = requestCtx
+		} else {
+			parentCtx = context.Background()
+		}
 	}
-
-	var requestCtx context.Context
-	if c != nil && c.Request != nil {
-		requestCtx = c.Request.Context()
-	}
+	clearWriteDeadlineForLongLivedRequest(c)
 
 	if requestCtx != nil && logging.GetRequestID(parentCtx) == "" {
 		if requestID := logging.GetRequestID(requestCtx); requestID != "" {
@@ -446,7 +501,7 @@ func (h *BaseAPIHandler) StartNonStreamingKeepAlive(c *gin.Context, ctx context.
 		return func() {}
 	}
 	if ctx == nil {
-		ctx = context.Background()
+		ctx = requestContextOrBackground(c)
 	}
 
 	stopChan := make(chan struct{})

@@ -1,19 +1,41 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	gin "github.com/gin-gonic/gin"
 	proxyconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
+	sdkhandlers "github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 )
+
+type deadlineTrackingWriter struct {
+	gin.ResponseWriter
+	deadlines []time.Time
+}
+
+func (w *deadlineTrackingWriter) SetWriteDeadline(deadline time.Time) error {
+	w.deadlines = append(w.deadlines, deadline)
+	return nil
+}
+
+func (w *deadlineTrackingWriter) sawZeroDeadline() bool {
+	for i := range w.deadlines {
+		if w.deadlines[i].IsZero() {
+			return true
+		}
+	}
+	return false
+}
 
 func newTestServer(t *testing.T) *Server {
 	t.Helper()
@@ -115,6 +137,87 @@ func TestAmpProviderModelRoutes(t *testing.T) {
 				t.Fatalf("response body for %s missing %q: %s", tc.path, tc.wantContains, body)
 			}
 		})
+	}
+}
+
+func TestNewServerSetsMainWriteTimeout(t *testing.T) {
+	server := newTestServer(t)
+	if server.server == nil {
+		t.Fatal("expected http server to be initialized")
+	}
+	if got := server.server.WriteTimeout; got != mainAPIServerWriteTimeout {
+		t.Fatalf("WriteTimeout = %s, want %s", got, mainAPIServerWriteTimeout)
+	}
+}
+
+func TestOAuthCallbackRouteStillServesSuccessHTML(t *testing.T) {
+	server := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/codex/callback?state=session-1&code=auth-code", nil)
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	if got := rr.Header().Get("Content-Type"); !strings.Contains(got, "text/html") {
+		t.Fatalf("Content-Type = %q, want text/html", got)
+	}
+	if !strings.Contains(rr.Body.String(), "Authentication successful") {
+		t.Fatalf("expected success HTML, got %s", rr.Body.String())
+	}
+}
+
+func TestClearServerWriteDeadlineUsesZeroDeadline(t *testing.T) {
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
+	tracking := &deadlineTrackingWriter{ResponseWriter: c.Writer}
+	c.Writer = tracking
+
+	clearServerWriteDeadline(c)
+
+	if !tracking.sawZeroDeadline() {
+		t.Fatal("expected clearServerWriteDeadline to clear the write deadline")
+	}
+}
+
+func TestGetContextWithCancelUsesRequestContextWhenParentNil(t *testing.T) {
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"test-model"}`))
+	reqCtx, cancelReq := context.WithCancel(req.Context())
+	defer cancelReq()
+	c.Request = req.WithContext(reqCtx)
+
+	handler := &sdkhandlers.BaseAPIHandler{Cfg: &sdkconfig.SDKConfig{}}
+	ctx, cancelHandler := handler.GetContextWithCancel(nil, c, nil)
+	defer cancelHandler()
+
+	cancelReq()
+
+	select {
+	case <-ctx.Done():
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("expected derived context to follow request cancellation when parent context is nil")
+	}
+}
+
+func TestGetContextWithCancelClearsWriteDeadlineForStreamingRequests(t *testing.T) {
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"test-model","stream":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	c.Request = req
+	tracking := &deadlineTrackingWriter{ResponseWriter: c.Writer}
+	c.Writer = tracking
+
+	handler := &sdkhandlers.BaseAPIHandler{Cfg: &sdkconfig.SDKConfig{}}
+	_, cancelHandler := handler.GetContextWithCancel(nil, c, c.Request.Context())
+	cancelHandler()
+
+	if !tracking.sawZeroDeadline() {
+		t.Fatal("expected streaming request to clear the server write deadline")
 	}
 }
 

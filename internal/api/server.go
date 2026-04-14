@@ -48,7 +48,12 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const oauthCallbackSuccessHTML = `<html><head><meta charset="utf-8"><title>Authentication successful</title><script>setTimeout(function(){window.close();},5000);</script></head><body><h1>Authentication successful!</h1><p>You can close this window.</p><p>This window will close automatically in 5 seconds.</p></body></html>`
+const (
+	oauthCallbackSuccessHTML = `<html><head><meta charset="utf-8"><title>Authentication successful</title><script>setTimeout(function(){window.close();},5000);</script></head><body><h1>Authentication successful!</h1><p>You can close this window.</p><p>This window will close automatically in 5 seconds.</p></body></html>`
+	// Main API requests can legitimately spend several minutes waiting on upstream model execution.
+	// Long-lived SSE and websocket routes explicitly clear this deadline before streaming/upgrading.
+	mainAPIServerWriteTimeout = 10 * time.Minute
+)
 
 type serverOptionConfig struct {
 	extraMiddleware      []gin.HandlerFunc
@@ -330,6 +335,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		Handler:           engine,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      mainAPIServerWriteTimeout,
 		IdleTimeout:       2 * time.Minute,
 		MaxHeaderBytes:    1 << 20,
 	}
@@ -361,7 +367,10 @@ func (s *Server) setupRoutes() {
 		v1.POST("/completions", openaiHandlers.Completions)
 		v1.POST("/messages", claudeCodeHandlers.ClaudeMessages)
 		v1.POST("/messages/count_tokens", claudeCodeHandlers.ClaudeCountTokens)
-		v1.GET("/responses", openaiResponsesHandlers.ResponsesWebsocket)
+		v1.GET("/responses", func(c *gin.Context) {
+			clearServerWriteDeadline(c)
+			openaiResponsesHandlers.ResponsesWebsocket(c)
+		})
 		v1.POST("/responses", openaiResponsesHandlers.Responses)
 		v1.POST("/responses/compact", openaiResponsesHandlers.Compact)
 	}
@@ -496,6 +505,7 @@ func (s *Server) AttachWebsocketRoute(path string, handler http.Handler) {
 		authMiddleware(c)
 	}
 	finalHandler := func(c *gin.Context) {
+		clearServerWriteDeadline(c)
 		handler.ServeHTTP(c.Writer, c.Request)
 		c.Abort()
 	}
@@ -518,7 +528,10 @@ func (s *Server) registerManagementRoutes() {
 	{
 		mgmt.GET("/dashboard-summary", s.mgmt.GetDashboardSummary)
 		mgmt.GET("/system-stats", s.mgmt.GetSystemStats)
-		mgmt.GET("/system-stats/ws", s.mgmt.SystemStatsWebSocket)
+		mgmt.GET("/system-stats/ws", func(c *gin.Context) {
+			clearServerWriteDeadline(c)
+			s.mgmt.SystemStatsWebSocket(c)
+		})
 		mgmt.GET("/models", s.mgmt.GetModels)
 		mgmt.GET("/model-pricing", s.mgmt.GetModelPricing)
 		mgmt.PUT("/model-pricing", s.mgmt.PutModelPricing)
@@ -733,8 +746,10 @@ func (s *Server) serveManagementControlPanel(c *gin.Context) {
 		if _, err := os.Stat(filePath); err != nil {
 			if os.IsNotExist(err) {
 				reqCtx := context.Background()
-				if c != nil && c.Request != nil && c.Request.Context() != nil {
-					reqCtx = c.Request.Context()
+				if c != nil && c.Request != nil {
+					if requestCtx := c.Request.Context(); requestCtx != nil {
+						reqCtx = requestCtx
+					}
 				}
 				if !managementasset.EnsureLatestManagementHTML(reqCtx, managementasset.StaticDir(s.configFilePath), cfg.ProxyURL, cfg.RemoteManagement.PanelGitHubRepository) {
 					c.AbortWithStatus(http.StatusNotFound)
@@ -778,6 +793,13 @@ func (s *Server) serveManagementControlPanel(c *gin.Context) {
 	// HTML files should not be cached – always serve fresh.
 	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
 	c.File(htmlFile)
+}
+
+func clearServerWriteDeadline(c *gin.Context) {
+	if c == nil || c.Writer == nil {
+		return
+	}
+	_ = http.NewResponseController(c.Writer).SetWriteDeadline(time.Time{})
 }
 
 // resolvePanelDir returns the directory containing the SPA panel (manage.html + assets/).
