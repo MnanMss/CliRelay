@@ -221,6 +221,37 @@ func TestGetContextWithCancelClearsWriteDeadlineForStreamingRequests(t *testing.
 	}
 }
 
+func TestAttachWebsocketRouteClearsWriteDeadlineBeforeServingHandler(t *testing.T) {
+	server := newTestServer(t)
+
+	var sawZeroDeadline bool
+	server.engine.Use(func(c *gin.Context) {
+		tracker := &deadlineTrackingWriter{ResponseWriter: c.Writer}
+		c.Writer = tracker
+		c.Next()
+		if c.FullPath() == "/v1/ws-test" {
+			sawZeroDeadline = tracker.sawZeroDeadline()
+		}
+	})
+	server.AttachWebsocketRoute("/v1/ws-test", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/ws-test", nil)
+	req.Header.Set("Upgrade", "websocket")
+	req.Header.Set("Authorization", "Bearer test-key")
+
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusNoContent)
+	}
+	if !sawZeroDeadline {
+		t.Fatal("expected websocket route to clear the write deadline before serving handler")
+	}
+}
+
 func TestCORSMiddlewareRejectsUnconfiguredCrossOriginRequest(t *testing.T) {
 	server := newTestServer(t)
 
