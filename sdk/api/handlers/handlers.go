@@ -16,6 +16,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/bodyutil"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
@@ -56,6 +57,36 @@ const (
 type pinnedAuthContextKey struct{}
 type selectedAuthCallbackContextKey struct{}
 type executionSessionContextKey struct{}
+
+// ReadJSONRequestBody applies the shared request-body limit and writes a standard API error response.
+func ReadJSONRequestBody(c *gin.Context) ([]byte, bool) {
+	if c == nil {
+		return nil, false
+	}
+
+	body, err := bodyutil.ReadRequestBody(c, bodyutil.DefaultRequestBodyLimit)
+	if err == nil {
+		return body, true
+	}
+
+	status := http.StatusBadRequest
+	message := fmt.Sprintf("Invalid request: %v", err)
+	code := ""
+	if bodyutil.IsTooLarge(err) {
+		status = http.StatusRequestEntityTooLarge
+		message = "Request body too large"
+		code = "request_body_too_large"
+	}
+
+	c.JSON(status, ErrorResponse{
+		Error: ErrorDetail{
+			Message: message,
+			Type:    "invalid_request_error",
+			Code:    code,
+		},
+	})
+	return nil, false
+}
 
 // WithPinnedAuthID returns a child context that requests execution on a specific auth ID.
 func WithPinnedAuthID(ctx context.Context, authID string) context.Context {

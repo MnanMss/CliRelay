@@ -1,6 +1,6 @@
 # io.ReadAll Inventory
 
-更新时间：2026-04-13
+更新时间：2026-04-14 09:46:33 +0800
 
 ## 分类结论
 
@@ -27,6 +27,8 @@
 ## 已完成底座
 
 - 请求体读取已优先收敛到 `bodyutil.ReadRequestBody` / `LimitBodyMiddleware`。
+- OpenAI / Gemini / Claude SDK API 入口已经不再直接 `GetRawData()`，统一经 `bodyutil.ReadRequestBody` 走默认大小限制与一致错误响应。
+- 管理接口下仍有 `GetRawData()` 的配置编辑路径，但它们已经统一挂在 `LimitBodyMiddleware(bodyutil.ManagementBodyLimit)` 之后，不再绕过请求体大小限制。
 - auth 文件 raw 上传和 Vertex multipart 上传已有服务端大小限制。
 
 ## 下一步

@@ -58,7 +58,10 @@ func (h *GeminiCLIAPIHandler) CLIHandler(c *gin.Context) {
 		return
 	}
 
-	rawJSON, _ := c.GetRawData()
+	rawJSON, ok := handlers.ReadJSONRequestBody(c)
+	if !ok {
+		return
+	}
 	requestRawURI := c.Request.URL.Path
 
 	if requestRawURI == "/v1internal:generateContent" {
