@@ -23,9 +23,14 @@ import (
 var (
 	statisticsEnabled atomic.Bool
 	redisClient       *redis.Client
-	redisCtx          = context.Background()
-	redisCancel       context.CancelFunc
-	redisSyncWg       sync.WaitGroup
+	// redisCtx 代表 usage Redis 同步器的服务级后台上下文：
+	// - owner: InitRedis / StopRedis
+	// - 取消条件: StopRedis
+	// - 超时策略: 周期 ticker 驱动；单次 Redis 命令使用客户端默认/调用方超时
+	// - 清理方式: redisCancel + redisSyncWg 等待后台同步循环退出
+	redisCtx    = context.Background()
+	redisCancel context.CancelFunc
+	redisSyncWg sync.WaitGroup
 )
 
 const redisUsageKey = "cliproxy:usage_stats_snapshot"
@@ -107,6 +112,7 @@ func InitRedis(cfg config.RedisConfig) {
 		}
 	}
 
+	// Redis 同步循环独立于单次请求，受服务 shutdown 控制。
 	redisCtx, redisCancel = context.WithCancel(context.Background())
 	redisSyncWg.Add(1)
 	go redisSyncLoop()
@@ -152,6 +158,8 @@ func saveToRedis() {
 		return
 	}
 	// We don't set an expiration; it should persist indefinitely
+	// saveToRedis 可能发生在定时后台循环或 StopRedis 最终 flush 阶段，
+	// 不依赖任意请求 context，因此使用根 context。
 	if err := redisClient.Set(context.Background(), redisUsageKey, data, 0).Err(); err != nil {
 		log.Errorf("failed to save usage snapshot to Redis: %v", err)
 	}
@@ -161,6 +169,7 @@ func loadFromRedis() error {
 	if redisClient == nil || defaultRequestStatistics == nil {
 		return nil
 	}
+	// loadFromRedis 属于服务启动期恢复逻辑，不绑定请求生命周期。
 	data, err := redisClient.Get(context.Background(), redisUsageKey).Bytes()
 	if err != nil {
 		if err == redis.Nil {

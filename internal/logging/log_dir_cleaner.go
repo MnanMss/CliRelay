@@ -34,6 +34,11 @@ func configureLogDirCleanerLocked(logDir string, maxTotalSizeMB int, protectedPa
 
 	ctx, cancel := context.WithCancel(context.Background())
 	logDirCleanerCancel = cancel
+	// 日志目录清理器属于 logging 子系统自身的后台维护任务：
+	// - owner: logging 配置生命周期
+	// - 取消条件: stopLogDirCleanerLocked / 下一次重新配置 / 进程退出
+	// - 超时策略: 无单次请求超时，按 ticker 周期执行
+	// - 清理方式: cancel 后退出 runLogDirCleaner 循环，不依赖外部请求 context
 	go runLogDirCleaner(ctx, filepath.Clean(dir), maxBytes, strings.TrimSpace(protectedPath))
 }
 

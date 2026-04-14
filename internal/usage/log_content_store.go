@@ -148,6 +148,11 @@ func startRequestLogMaintenance(db *sql.DB) {
 	wakeup := make(chan struct{}, 1)
 	requestLogMaintenanceWakeup.Store(wakeup)
 	requestLogMaintenanceWG.Add(1)
+	// 请求日志维护协程属于 usage 存储子系统：
+	// - owner: startRequestLogMaintenance / stopRequestLogMaintenance
+	// - 取消条件: stopRequestLogMaintenance、数据库关闭、进程退出
+	// - 超时策略: 周期 cleanup + wakeup 驱动；单次 DB 操作各自控制
+	// - 清理方式: cancel 后等待 requestLogMaintenanceWG，确保协程退出
 	go func() {
 		defer requestLogMaintenanceWG.Done()
 		runRequestLogMaintenancePass(db)
@@ -382,6 +387,8 @@ func migrateLegacyContentBatch(db *sql.DB, batchSize int) (int, error) {
 		return 0, nil
 	}
 
+	// 迁移批处理是 DB 维护任务，不绑定任意请求生命周期。
+	// 这里显式使用根 context，让事务仅受数据库自身错误/关闭影响。
 	tx, err := db.BeginTx(context.Background(), nil)
 	if err != nil {
 		return 0, fmt.Errorf("usage: begin legacy migration tx: %w", err)

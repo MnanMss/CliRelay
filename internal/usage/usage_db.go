@@ -195,6 +195,8 @@ func InitDB(dbPath string, storageCfg config.RequestLogStorageConfig, loc *time.
 
 	// Verify connectivity with a timeout to avoid hanging on WAL recovery
 	log.Debugf("usage: pinging database to verify connectivity")
+	// SQLite ping 属于服务启动期健康检查，不绑定请求生命周期；
+	// 这里使用带超时的根 context，避免 WAL 恢复阶段无限阻塞。
 	pingCtx, pingCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer pingCancel()
 	if err := db.PingContext(pingCtx); err != nil {
@@ -273,6 +275,8 @@ func InsertLog(apiKey, apiKeyName, model, source, channelName, authIndex string,
 	// Calculate cost based on model pricing
 	cost := CalculateCost(model, tokens.InputTokens, tokens.OutputTokens, tokens.CachedTokens)
 
+	// 插入 request log 的事务由 usage 存储层统一拥有，不从外部 HTTP 请求透传 context，
+	// 以避免请求取消把已经选定要持久化的审计记录中断在半途。
 	tx, err := db.BeginTx(context.Background(), nil)
 	if err != nil {
 		log.Errorf("usage: begin insert tx: %v", err)
