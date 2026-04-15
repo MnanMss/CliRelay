@@ -63,7 +63,7 @@ func normalizeChannelPriorities(values map[string]int) map[string]int {
 	out := make(map[string]int, len(values))
 	for key, priority := range values {
 		name := strings.TrimSpace(key)
-		if name == "" || priority == 0 {
+		if name == "" || priority < 0 {
 			continue
 		}
 		existing, exists := out[name]

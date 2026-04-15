@@ -118,18 +118,26 @@ func (e *modelCooldownError) Headers() http.Header {
 }
 
 func authPriority(auth *Auth) int {
-	if auth == nil || auth.Attributes == nil {
+	priority, ok := authPriorityValue(auth)
+	if !ok {
 		return 0
+	}
+	return priority
+}
+
+func authPriorityValue(auth *Auth) (int, bool) {
+	if auth == nil || auth.Attributes == nil {
+		return 0, false
 	}
 	raw := strings.TrimSpace(auth.Attributes["priority"])
 	if raw == "" {
-		return 0
+		return 0, false
 	}
 	parsed, err := strconv.Atoi(raw)
 	if err != nil {
-		return 0
+		return 0, false
 	}
-	return parsed
+	return parsed, true
 }
 
 func canonicalModelKey(model string) string {
@@ -235,14 +243,72 @@ func routeGroupSelectionScope(meta map[string]any) string {
 	}
 }
 
-func isGroupedRouteSelection(meta map[string]any) bool {
-	return routeGroupSelectionScope(meta) != ""
+func allowedChannelGroupsSelectionScope(meta map[string]any) string {
+	if len(meta) == 0 {
+		return ""
+	}
+	raw, ok := meta["allowed-channel-groups"]
+	if !ok || raw == nil {
+		return ""
+	}
+	var values []string
+	switch v := raw.(type) {
+	case string:
+		values = strings.Split(v, ",")
+	case []string:
+		values = v
+	case []any:
+		values = make([]string, 0, len(v))
+		for _, item := range v {
+			values = append(values, fmt.Sprint(item))
+		}
+	case []byte:
+		values = strings.Split(string(v), ",")
+	default:
+		return ""
+	}
+	normalized := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		value = strings.ToLower(strings.TrimSpace(value))
+		value = strings.Trim(value, "/")
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		normalized = append(normalized, value)
+	}
+	if len(normalized) == 0 {
+		return ""
+	}
+	sort.Strings(normalized)
+	return strings.Join(normalized, ",")
+}
+
+func weightedSelectionScope(meta map[string]any) string {
+	if routeGroup := routeGroupSelectionScope(meta); routeGroup != "" {
+		return "route:" + routeGroup
+	}
+	if allowedGroups := allowedChannelGroupsSelectionScope(meta); allowedGroups != "" {
+		return "allowed:" + allowedGroups
+	}
+	return ""
+}
+
+func isWeightedPrioritySelection(meta map[string]any) bool {
+	return weightedSelectionScope(meta) != ""
 }
 
 func authSelectionWeight(auth *Auth) int {
-	weight := authPriority(auth)
-	if weight <= 0 {
+	weight, ok := authPriorityValue(auth)
+	if !ok {
 		return 1
+	}
+	if weight <= 0 {
+		return 0
 	}
 	return weight
 }
@@ -273,13 +339,25 @@ func getAvailableAuths(auths []*Auth, provider, model string, now time.Time, inc
 		total := 0
 		for priority, items := range availableByPriority {
 			priorities = append(priorities, priority)
-			total += len(items)
+			for _, item := range items {
+				if authSelectionWeight(item) > 0 {
+					total++
+				}
+			}
 		}
 		sort.Ints(priorities)
 
 		available := make([]*Auth, 0, total)
 		for _, priority := range priorities {
-			available = append(available, availableByPriority[priority]...)
+			for _, item := range availableByPriority[priority] {
+				if authSelectionWeight(item) <= 0 {
+					continue
+				}
+				available = append(available, item)
+			}
+		}
+		if len(available) == 0 {
+			return nil, &Error{Code: "auth_unavailable", Message: "no auth available"}
 		}
 		sort.Slice(available, func(i, j int) bool { return available[i].ID < available[j].ID })
 		return available, nil
@@ -315,7 +393,7 @@ func ensureWeightedState(states map[string]*weightedCursorState, key string, lim
 }
 
 func weightedSelectionKey(provider, model string, opts cliproxyexecutor.Options) string {
-	return provider + ":" + canonicalModelKey(model) + ":group:" + routeGroupSelectionScope(opts.Metadata)
+	return provider + ":" + canonicalModelKey(model) + ":" + weightedSelectionScope(opts.Metadata)
 }
 
 func pickWeightedAvailable(states map[string]*weightedCursorState, key string, available []*Auth) *Auth {
@@ -338,13 +416,20 @@ func pickWeightedAvailable(states map[string]*weightedCursorState, key string, a
 			continue
 		}
 		activeIDs[auth.ID] = struct{}{}
-		totalWeight += authSelectionWeight(auth)
-		state.current[auth.ID] += authSelectionWeight(auth)
+		weight := authSelectionWeight(auth)
+		if weight <= 0 {
+			continue
+		}
+		totalWeight += weight
+		state.current[auth.ID] += weight
 	}
 	for id := range state.current {
 		if _, ok := activeIDs[id]; !ok {
 			delete(state.current, id)
 		}
+	}
+	if totalWeight <= 0 {
+		return nil
 	}
 
 	start := 0
@@ -379,8 +464,8 @@ func pickWeightedAvailable(states map[string]*weightedCursorState, key string, a
 // accounts), then cycling within each group's project auths.
 func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	now := time.Now()
-	groupedRoute := isGroupedRouteSelection(opts.Metadata)
-	available, err := getAvailableAuths(auths, provider, model, now, groupedRoute)
+	weightedSelection := isWeightedPrioritySelection(opts.Metadata)
+	available, err := getAvailableAuths(auths, provider, model, now, weightedSelection)
 	if err != nil {
 		return nil, err
 	}
@@ -394,7 +479,7 @@ func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, o
 	if limit <= 0 {
 		limit = 4096
 	}
-	if groupedRoute {
+	if weightedSelection {
 		if s.weighted == nil {
 			s.weighted = make(map[string]*weightedCursorState)
 		}
@@ -491,13 +576,13 @@ func groupByVirtualParent(auths []*Auth) (map[string][]*Auth, []string) {
 // Pick selects the first available auth for the provider in a deterministic manner.
 func (s *FillFirstSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	now := time.Now()
-	groupedRoute := isGroupedRouteSelection(opts.Metadata)
-	available, err := getAvailableAuths(auths, provider, model, now, groupedRoute)
+	weightedSelection := isWeightedPrioritySelection(opts.Metadata)
+	available, err := getAvailableAuths(auths, provider, model, now, weightedSelection)
 	if err != nil {
 		return nil, err
 	}
 	available = preferCodexWebsocketAuths(ctx, provider, available)
-	if groupedRoute {
+	if weightedSelection {
 		s.mu.Lock()
 		if s.weighted == nil {
 			s.weighted = make(map[string]*weightedCursorState)

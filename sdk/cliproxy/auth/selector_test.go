@@ -142,6 +142,59 @@ func TestRoundRobinSelectorPick_GroupedRouteUsesLinearPriorityWeights(t *testing
 	}
 }
 
+func TestRoundRobinSelectorPick_AllowedChannelGroupUsesLinearPriorityWeights(t *testing.T) {
+	t.Parallel()
+
+	selector := &RoundRobinSelector{}
+	auths := []*Auth{
+		{ID: "b", Attributes: map[string]string{"priority": "1"}},
+		{ID: "a", Attributes: map[string]string{"priority": "2"}},
+	}
+	opts := cliproxyexecutor.Options{
+		Metadata: map[string]any{"allowed-channel-groups": "chatgpt-mix"},
+	}
+
+	want := []string{"a", "b", "a", "a", "b", "a"}
+	for i, id := range want {
+		got, err := selector.Pick(context.Background(), "mixed", "", opts, auths)
+		if err != nil {
+			t.Fatalf("Pick() #%d error = %v", i, err)
+		}
+		if got == nil {
+			t.Fatalf("Pick() #%d auth = nil", i)
+		}
+		if got.ID != id {
+			t.Fatalf("Pick() #%d auth.ID = %q, want %q", i, got.ID, id)
+		}
+	}
+}
+
+func TestRoundRobinSelectorPick_AllowedChannelGroupZeroWeightIsExcluded(t *testing.T) {
+	t.Parallel()
+
+	selector := &RoundRobinSelector{}
+	auths := []*Auth{
+		{ID: "b", Attributes: map[string]string{"priority": "0"}},
+		{ID: "a", Attributes: map[string]string{"priority": "100"}},
+	}
+	opts := cliproxyexecutor.Options{
+		Metadata: map[string]any{"allowed-channel-groups": "chatgpt-mix"},
+	}
+
+	for i := 0; i < 5; i++ {
+		got, err := selector.Pick(context.Background(), "mixed", "", opts, auths)
+		if err != nil {
+			t.Fatalf("Pick() #%d error = %v", i, err)
+		}
+		if got == nil {
+			t.Fatalf("Pick() #%d auth = nil", i)
+		}
+		if got.ID != "a" {
+			t.Fatalf("Pick() #%d auth.ID = %q, want %q", i, got.ID, "a")
+		}
+	}
+}
+
 func TestFillFirstSelectorPick_GroupedRouteUsesWeightedScheduling(t *testing.T) {
 	t.Parallel()
 

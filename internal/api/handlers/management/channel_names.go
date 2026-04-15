@@ -184,7 +184,7 @@ func canonicalizeChannelPriorities(values map[string]int, known map[string]known
 	out := make(map[string]int, len(values))
 	for name, priority := range values {
 		canonical := canonicalChannelName(name, known)
-		if canonical == "" || priority == 0 {
+		if canonical == "" || priority < 0 {
 			continue
 		}
 		if existing, exists := out[canonical]; !exists || priority > existing {

@@ -84,7 +84,73 @@ func TestAuthGroupsMatchesLegacyOAuthEmailAfterRename(t *testing.T) {
 	if _, ok := groups["team-alpha"]; !ok {
 		t.Fatalf("expected group match through legacy email alias, got %v", groups)
 	}
-	if got := derivedGroupPriority(cfg, auth); got != 100 {
+	if got, ok := derivedGroupPriority(cfg, auth, map[string]struct{}{"team-alpha": {}}); !ok || got != 100 {
 		t.Fatalf("derivedGroupPriority() = %d, want 100", got)
+	}
+}
+
+func TestDerivedGroupPriorityPreservesExplicitZero(t *testing.T) {
+	t.Parallel()
+
+	cfg := &internalconfig.Config{
+		Routing: internalconfig.RoutingConfig{
+			ChannelGroups: []internalconfig.RoutingChannelGroup{
+				{
+					Name: "team-alpha",
+					Match: internalconfig.ChannelGroupMatch{
+						Channels: []string{"chatgpt-pro1"},
+					},
+					ChannelPriorities: map[string]int{
+						"chatgpt-pro1": 0,
+					},
+				},
+			},
+		},
+	}
+	auth := &Auth{Label: "chatgpt-pro1"}
+
+	got, ok := derivedGroupPriority(cfg, auth, map[string]struct{}{"team-alpha": {}})
+	if !ok {
+		t.Fatal("derivedGroupPriority() did not report an explicit priority")
+	}
+	if got != 0 {
+		t.Fatalf("derivedGroupPriority() = %d, want 0", got)
+	}
+
+	prepared := prepareCandidateForSelection(cfg, auth, "", map[string]struct{}{"team-alpha": {}})
+	if prepared == nil {
+		t.Fatal("prepareCandidateForSelection() = nil")
+	}
+	if got := prepared.Attributes["priority"]; got != "0" {
+		t.Fatalf("prepared priority = %q, want %q", got, "0")
+	}
+}
+
+func TestPrepareCandidateForSelectionIgnoresPriorityOutsideSelectionScope(t *testing.T) {
+	t.Parallel()
+
+	cfg := &internalconfig.Config{
+		Routing: internalconfig.RoutingConfig{
+			ChannelGroups: []internalconfig.RoutingChannelGroup{
+				{
+					Name: "team-alpha",
+					Match: internalconfig.ChannelGroupMatch{
+						Channels: []string{"chatgpt-pro1"},
+					},
+					ChannelPriorities: map[string]int{
+						"chatgpt-pro1": 100,
+					},
+				},
+			},
+		},
+	}
+	auth := &Auth{Label: "chatgpt-pro1"}
+
+	prepared := prepareCandidateForSelection(cfg, auth, "", nil)
+	if prepared == nil {
+		t.Fatal("prepareCandidateForSelection() = nil")
+	}
+	if got := prepared.Attributes["priority"]; got != "" {
+		t.Fatalf("prepared priority = %q, want empty outside scoped selection", got)
 	}
 }

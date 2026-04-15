@@ -1914,7 +1914,11 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 			if modelKey != "" && !candidateSupportsModel(cfg, registryRef, candidate, modelKey, routeGroup, allowedGroups) {
 				continue
 			}
-			candidates = append(candidates, prepareCandidateForSelection(cfg, candidate))
+			scopedRouteGroup := ""
+			if enforceRouteGroup {
+				scopedRouteGroup = routeGroup
+			}
+			candidates = append(candidates, prepareCandidateForSelection(cfg, candidate, scopedRouteGroup, allowedGroups))
 		}
 		return candidates
 	}
@@ -2012,7 +2016,11 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 			if modelKey != "" && !candidateSupportsModel(cfg, registryRef, candidate, modelKey, routeGroup, allowedGroups) {
 				continue
 			}
-			candidates = append(candidates, prepareCandidateForSelection(cfg, candidate))
+			scopedRouteGroup := ""
+			if enforceRouteGroup {
+				scopedRouteGroup = routeGroup
+			}
+			candidates = append(candidates, prepareCandidateForSelection(cfg, candidate, scopedRouteGroup, allowedGroups))
 		}
 		return candidates
 	}

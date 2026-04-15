@@ -154,33 +154,64 @@ func authInRouteGroup(cfg *internalconfig.Config, auth *Auth, group string) bool
 	return ok
 }
 
-func derivedGroupPriority(cfg *internalconfig.Config, auth *Auth) int {
+func priorityScopeGroups(routeGroup string, allowedGroups map[string]struct{}) map[string]struct{} {
+	routeGroup = internalrouting.NormalizeGroupName(routeGroup)
+	if routeGroup != "" {
+		return map[string]struct{}{routeGroup: {}}
+	}
+	if len(allowedGroups) == 0 {
+		return nil
+	}
+	out := make(map[string]struct{}, len(allowedGroups))
+	for group := range allowedGroups {
+		group = internalrouting.NormalizeGroupName(group)
+		if group == "" {
+			continue
+		}
+		out[group] = struct{}{}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func derivedGroupPriority(cfg *internalconfig.Config, auth *Auth, scopedGroups map[string]struct{}) (int, bool) {
 	if cfg == nil || auth == nil {
-		return 0
+		return 0, false
+	}
+	if len(scopedGroups) == 0 {
+		return 0, false
 	}
 	groups := authGroups(cfg, auth)
 	if len(groups) == 0 {
-		return 0
+		return 0, false
 	}
 	best := 0
+	found := false
 	for i := range cfg.Routing.ChannelGroups {
 		group := cfg.Routing.ChannelGroups[i]
 		if _, ok := groups[group.Name]; !ok {
 			continue
 		}
+		if _, ok := scopedGroups[group.Name]; !ok {
+			continue
+		}
 		for name, priority := range group.ChannelPriorities {
-			if authMatchesChannelName(auth, name) && priority > best {
+			if authMatchesChannelName(auth, name) && (!found || priority > best) {
 				best = priority
+				found = true
 			}
 		}
-		if group.Priority > best {
+		if group.Priority != 0 && (!found || group.Priority > best) {
 			best = group.Priority
+			found = true
 		}
 	}
-	return best
+	return best, found
 }
 
-func prepareCandidateForSelection(cfg *internalconfig.Config, auth *Auth) *Auth {
+func prepareCandidateForSelection(cfg *internalconfig.Config, auth *Auth, routeGroup string, allowedGroups map[string]struct{}) *Auth {
 	if auth == nil {
 		return nil
 	}
@@ -191,8 +222,8 @@ func prepareCandidateForSelection(cfg *internalconfig.Config, auth *Auth) *Auth 
 	if strings.TrimSpace(cloned.Attributes["priority"]) != "" {
 		return cloned
 	}
-	priority := derivedGroupPriority(cfg, cloned)
-	if priority == 0 {
+	priority, ok := derivedGroupPriority(cfg, cloned, priorityScopeGroups(routeGroup, allowedGroups))
+	if !ok {
 		return cloned
 	}
 	if cloned.Attributes == nil {
