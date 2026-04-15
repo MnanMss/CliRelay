@@ -44,7 +44,7 @@ func (h *Handler) PutIdentityFingerprint(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if body.Codex.Enabled && body.Codex.SessionMode != "per-request" && strings.TrimSpace(body.Codex.SessionID) == "" {
+	if body.Codex.Enabled && body.Codex.SessionMode == "fixed" && strings.TrimSpace(body.Codex.SessionID) == "" {
 		body.Codex.SessionID = uuid.NewString()
 	}
 

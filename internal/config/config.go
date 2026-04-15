@@ -163,11 +163,11 @@ type KimiHeaderDefaults struct {
 }
 
 const (
-	DefaultCodexFingerprintUserAgent     = "codex_cli_rs/0.101.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464"
-	DefaultCodexFingerprintVersion       = "0.101.0"
+	DefaultCodexFingerprintUserAgent     = "codex_cli_rs/0.120.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464"
+	DefaultCodexFingerprintVersion       = "0.120.0"
 	DefaultCodexFingerprintOriginator    = "codex_cli_rs"
 	DefaultCodexFingerprintWebsocketBeta = "responses_websockets=2026-02-04"
-	DefaultCodexFingerprintSessionMode   = "server-stable"
+	DefaultCodexFingerprintSessionMode   = "per-request"
 )
 
 // IdentityFingerprintConfig groups provider-specific upstream identity settings.

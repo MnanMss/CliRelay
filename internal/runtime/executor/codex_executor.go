@@ -27,8 +27,8 @@ import (
 )
 
 const (
-	codexClientVersion = "0.101.0"
-	codexUserAgent     = "codex_cli_rs/0.101.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464"
+	codexClientVersion = "0.120.0"
+	codexUserAgent     = "codex_cli_rs/0.120.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464"
 )
 
 var dataTag = []byte("data:")
