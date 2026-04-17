@@ -1348,6 +1348,8 @@ func versionHeaderMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Header("x-cpa-version", buildinfo.Version)
 		c.Header("x-cpa-build-date", buildinfo.BuildDate)
+		c.Header("x-cpa-ui-version", buildinfo.FrontendVersion)
+		c.Header("x-cpa-ui-commit", buildinfo.FrontendCommit)
 		c.Next()
 	}
 }

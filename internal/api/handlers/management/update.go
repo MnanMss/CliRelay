@@ -28,21 +28,26 @@ const (
 )
 
 type updateCheckResponse struct {
-	Enabled          bool   `json:"enabled"`
-	CurrentVersion   string `json:"current_version"`
-	CurrentCommit    string `json:"current_commit"`
-	BuildDate        string `json:"build_date"`
-	TargetChannel    string `json:"target_channel"`
-	LatestVersion    string `json:"latest_version"`
-	LatestCommit     string `json:"latest_commit"`
-	LatestCommitURL  string `json:"latest_commit_url,omitempty"`
-	DockerImage      string `json:"docker_image"`
-	DockerTag        string `json:"docker_tag"`
-	ReleaseNotes     string `json:"release_notes,omitempty"`
-	ReleaseURL       string `json:"release_url,omitempty"`
-	UpdateAvailable  bool   `json:"update_available"`
-	UpdaterAvailable bool   `json:"updater_available"`
-	Message          string `json:"message,omitempty"`
+	Enabled           bool   `json:"enabled"`
+	CurrentVersion    string `json:"current_version"`
+	CurrentCommit     string `json:"current_commit"`
+	CurrentUIVersion  string `json:"current_ui_version,omitempty"`
+	CurrentUICommit   string `json:"current_ui_commit,omitempty"`
+	BuildDate         string `json:"build_date"`
+	TargetChannel     string `json:"target_channel"`
+	LatestVersion     string `json:"latest_version"`
+	LatestCommit      string `json:"latest_commit"`
+	LatestCommitURL   string `json:"latest_commit_url,omitempty"`
+	LatestUIVersion   string `json:"latest_ui_version,omitempty"`
+	LatestUICommit    string `json:"latest_ui_commit,omitempty"`
+	LatestUICommitURL string `json:"latest_ui_commit_url,omitempty"`
+	DockerImage       string `json:"docker_image"`
+	DockerTag         string `json:"docker_tag"`
+	ReleaseNotes      string `json:"release_notes,omitempty"`
+	ReleaseURL        string `json:"release_url,omitempty"`
+	UpdateAvailable   bool   `json:"update_available"`
+	UpdaterAvailable  bool   `json:"updater_available"`
+	Message           string `json:"message,omitempty"`
 }
 
 type branchCommitInfo struct {
@@ -172,9 +177,14 @@ func (h *Handler) buildUpdateCheck(ctx context.Context) (*updateCheckResponse, e
 		channel = inferAutoUpdateChannel(buildinfo.Version, os.Getenv(autoUpdateChannelEnv))
 	}
 	repo := normalizeGitHubRepository(cfg.AutoUpdate.Repository)
+	frontendRepo := normalizeGitHubRepository(config.DefaultPanelGitHubRepository)
 	client := h.githubClient()
 
 	branch, err := fetchBranchCommit(ctx, client, repo, channel)
+	if err != nil {
+		return nil, err
+	}
+	frontendBranch, err := fetchBranchCommit(ctx, client, frontendRepo, channel)
 	if err != nil {
 		return nil, err
 	}
@@ -186,19 +196,29 @@ func (h *Handler) buildUpdateCheck(ctx context.Context) (*updateCheckResponse, e
 	}
 
 	resp := &updateCheckResponse{
-		Enabled:          cfg.AutoUpdate.Enabled,
-		CurrentVersion:   currentUpdateDisplayVersion(buildinfo.Version),
-		CurrentCommit:    buildinfo.Commit,
-		BuildDate:        buildinfo.BuildDate,
-		TargetChannel:    channel,
-		LatestVersion:    latestUpdateDisplayVersion(channel, branch.SHA),
-		LatestCommit:     strings.TrimSpace(branch.SHA),
-		LatestCommitURL:  strings.TrimSpace(branch.HTMLURL),
-		DockerImage:      cfg.AutoUpdate.DockerImage,
-		DockerTag:        dockerTagForChannel(channel, branch.SHA),
-		ReleaseNotes:     releaseNotes,
-		ReleaseURL:       strings.TrimSpace(release.HTMLURL),
-		UpdateAvailable:  cfg.AutoUpdate.Enabled && autoUpdateAvailableFromCommit(buildinfo.Commit, branch.SHA),
+		Enabled:           cfg.AutoUpdate.Enabled,
+		CurrentVersion:    currentUpdateDisplayVersion(buildinfo.Version),
+		CurrentCommit:     buildinfo.Commit,
+		CurrentUIVersion:  currentFrontendDisplayVersion(buildinfo.FrontendVersion, buildinfo.FrontendRef, buildinfo.FrontendCommit),
+		CurrentUICommit:   buildinfo.FrontendCommit,
+		BuildDate:         buildinfo.BuildDate,
+		TargetChannel:     channel,
+		LatestVersion:     latestUpdateDisplayVersion(channel, branch.SHA),
+		LatestCommit:      strings.TrimSpace(branch.SHA),
+		LatestCommitURL:   strings.TrimSpace(branch.HTMLURL),
+		LatestUIVersion:   latestFrontendDisplayVersion(channel, frontendBranch.SHA),
+		LatestUICommit:    strings.TrimSpace(frontendBranch.SHA),
+		LatestUICommitURL: strings.TrimSpace(frontendBranch.HTMLURL),
+		DockerImage:       cfg.AutoUpdate.DockerImage,
+		DockerTag:         dockerTagForChannel(channel, branch.SHA),
+		ReleaseNotes:      releaseNotes,
+		ReleaseURL:        strings.TrimSpace(release.HTMLURL),
+		UpdateAvailable: cfg.AutoUpdate.Enabled && autoUpdateAvailable(
+			buildinfo.Commit,
+			branch.SHA,
+			buildinfo.FrontendCommit,
+			frontendBranch.SHA,
+		),
 		UpdaterAvailable: checkUpdaterAvailable(ctx, cfg),
 	}
 	if !resp.Enabled {
@@ -300,6 +320,26 @@ func latestUpdateDisplayVersion(channel string, commit string) string {
 	return joinChannelCommit("main", commit)
 }
 
+func currentFrontendDisplayVersion(version string, ref string, commit string) string {
+	trimmed := strings.TrimSpace(version)
+	if trimmed != "" && !strings.EqualFold(trimmed, "dev") {
+		return trimmed
+	}
+	normalizedRef := normalizeAutoUpdateChannel(ref)
+	if normalizedRef == "auto" || normalizedRef == "" {
+		normalizedRef = "main"
+	}
+	return latestFrontendDisplayVersion(normalizedRef, commit)
+}
+
+func latestFrontendDisplayVersion(channel string, commit string) string {
+	normalized := normalizeAutoUpdateChannel(channel)
+	if normalized == "dev" {
+		return "panel-" + joinChannelCommit("dev", commit)
+	}
+	return "panel-" + joinChannelCommit("main", commit)
+}
+
 func joinChannelCommit(channel string, commit string) string {
 	short := shortCommit(commit)
 	if short == "" {
@@ -328,6 +368,11 @@ func autoUpdateAvailableFromCommit(currentCommit string, latestCommit string) bo
 	current = strings.ToLower(current)
 	latest = strings.ToLower(latest)
 	return !(strings.HasPrefix(latest, current) || strings.HasPrefix(current, latest))
+}
+
+func autoUpdateAvailable(currentBackendCommit string, latestBackendCommit string, currentFrontendCommit string, latestFrontendCommit string) bool {
+	return autoUpdateAvailableFromCommit(currentBackendCommit, latestBackendCommit) ||
+		autoUpdateAvailableFromCommit(currentFrontendCommit, latestFrontendCommit)
 }
 
 func dockerTagForChannel(channel string, _ string) string {

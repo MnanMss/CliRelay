@@ -58,6 +58,67 @@ func TestAutoUpdateAvailableFromCommit(t *testing.T) {
 	}
 }
 
+func TestAutoUpdateAvailable(t *testing.T) {
+	tests := []struct {
+		name            string
+		currentBackend  string
+		latestBackend   string
+		currentFrontend string
+		latestFrontend  string
+		want            bool
+	}{
+		{
+			name:            "backend changed",
+			currentBackend:  "1111111",
+			latestBackend:   "abcdef123456",
+			currentFrontend: "panel-main-9477958",
+			latestFrontend:  "94779588adb784b1ceff19c662d3ab55155997e1",
+			want:            true,
+		},
+		{
+			name:            "frontend changed while backend stays the same",
+			currentBackend:  "a0ed5c63a118412d5b4da8d57ec6d049111b7888",
+			latestBackend:   "a0ed5c63a118412d5b4da8d57ec6d049111b7888",
+			currentFrontend: "1111111",
+			latestFrontend:  "94779588adb784b1ceff19c662d3ab55155997e1",
+			want:            true,
+		},
+		{
+			name:            "both backend and frontend already match",
+			currentBackend:  "a0ed5c63a118412d5b4da8d57ec6d049111b7888",
+			latestBackend:   "a0ed5c63a118412d5b4da8d57ec6d049111b7888",
+			currentFrontend: "94779588adb784b1ceff19c662d3ab55155997e1",
+			latestFrontend:  "94779588adb784b1ceff19c662d3ab55155997e1",
+			want:            false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := autoUpdateAvailable(
+				tt.currentBackend,
+				tt.latestBackend,
+				tt.currentFrontend,
+				tt.latestFrontend,
+			); got != tt.want {
+				t.Fatalf("autoUpdateAvailable() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFrontendDisplayVersionsIncludeConcreteCommit(t *testing.T) {
+	if got := currentFrontendDisplayVersion("panel-main-9477958", "main", "94779588adb784b1ceff19c662d3ab55155997e1"); got != "panel-main-9477958" {
+		t.Fatalf("currentFrontendDisplayVersion() = %q, want panel-main-9477958", got)
+	}
+	if got := latestFrontendDisplayVersion("main", "94779588adb784b1ceff19c662d3ab55155997e1"); got != "panel-main-9477958" {
+		t.Fatalf("latestFrontendDisplayVersion(main) = %q, want panel-main-9477958", got)
+	}
+	if got := latestFrontendDisplayVersion("dev", "3758025c21de3f0a47a8e1e08cb1b859c73069ba"); got != "panel-dev-3758025" {
+		t.Fatalf("latestFrontendDisplayVersion(dev) = %q, want panel-dev-3758025", got)
+	}
+}
+
 func TestDockerTagForChannel(t *testing.T) {
 	if got := dockerTagForChannel("dev", "a35756e"); got != "dev" {
 		t.Fatalf("dockerTagForChannel(dev) = %q, want dev", got)

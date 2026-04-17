@@ -12,4 +12,13 @@ var (
 
 	// BuildDate records when the binary was built in UTC.
 	BuildDate = "unknown"
+
+	// FrontendVersion is the management panel version baked into this binary image.
+	FrontendVersion = "dev"
+
+	// FrontendCommit is the codeProxy commit SHA baked into this binary image.
+	FrontendCommit = "none"
+
+	// FrontendRef is the codeProxy branch or ref used for the embedded panel.
+	FrontendRef = "main"
 )

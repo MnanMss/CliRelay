@@ -16,8 +16,8 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
-	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
+	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -179,6 +179,8 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 		c.Header("X-CPA-VERSION", buildinfo.Version)
 		c.Header("X-CPA-COMMIT", buildinfo.Commit)
 		c.Header("X-CPA-BUILD-DATE", buildinfo.BuildDate)
+		c.Header("X-CPA-UI-VERSION", buildinfo.FrontendVersion)
+		c.Header("X-CPA-UI-COMMIT", buildinfo.FrontendCommit)
 
 		clientIP := c.ClientIP()
 		localClient := clientIP == "127.0.0.1" || clientIP == "::1"
