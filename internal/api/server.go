@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -252,7 +253,13 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		}
 	}
 
-	engine.Use(corsMiddleware(cfg))
+	var s *Server
+	engine.Use(corsMiddleware(func() *config.Config {
+		if s != nil && s.cfg != nil {
+			return s.cfg
+		}
+		return cfg
+	}))
 	engine.Use(versionHeaderMiddleware())
 	wd, err := os.Getwd()
 	if err != nil {
@@ -264,7 +271,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	envManagementSecret := envAdminPasswordSet && envAdminPassword != ""
 
 	// Create server instance
-	s := &Server{
+	s = &Server{
 		engine:              engine,
 		handlers:            handlers.NewBaseAPIHandlers(&cfg.SDKConfig, authManager),
 		cfg:                 cfg,
@@ -1263,7 +1270,7 @@ func (s *Server) Stop(ctx context.Context) error {
 //
 // Returns:
 //   - gin.HandlerFunc: The CORS middleware handler
-func corsMiddleware(cfg *config.Config) gin.HandlerFunc {
+func corsMiddleware(cfgProvider func() *config.Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// Management APIs and the embedded panel should not be callable cross-origin by default.
 		// The panel is served from the same origin, so it does not need wildcard CORS.
@@ -1286,6 +1293,11 @@ func corsMiddleware(cfg *config.Config) gin.HandlerFunc {
 			}
 			c.Next()
 			return
+		}
+
+		var cfg *config.Config
+		if cfgProvider != nil {
+			cfg = cfgProvider()
 		}
 
 		allowedOrigin := resolveAllowedCORSOrigin(c.Request, cfg)
@@ -1326,6 +1338,10 @@ func resolveAllowedCORSOrigin(r *http.Request, cfg *config.Config) string {
 		return origin
 	}
 
+	if isChromeExtensionOrigin(origin) {
+		return origin
+	}
+
 	if cfg == nil {
 		return ""
 	}
@@ -1337,6 +1353,24 @@ func resolveAllowedCORSOrigin(r *http.Request, cfg *config.Config) string {
 	}
 
 	return ""
+}
+
+func isChromeExtensionOrigin(origin string) bool {
+	trimmed := strings.TrimSpace(origin)
+	if trimmed == "" {
+		return false
+	}
+
+	parsed, err := url.Parse(trimmed)
+	if err != nil || parsed == nil {
+		return false
+	}
+
+	if !strings.EqualFold(parsed.Scheme, "chrome-extension") {
+		return false
+	}
+
+	return strings.TrimSpace(parsed.Host) != ""
 }
 
 // versionHeaderMiddleware returns a Gin middleware handler that adds version

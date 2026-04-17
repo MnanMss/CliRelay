@@ -36,6 +36,7 @@ tls:
 
 # Explicit browser origins allowed to call API routes cross-origin.
 # Leave empty to disable cross-origin browser access by default.
+# Chrome extension origins (`chrome-extension://<extension-id>`) are allowed by default.
 # Examples:
 # cors-allow-origins:
 #   - "https://admin.example.com"

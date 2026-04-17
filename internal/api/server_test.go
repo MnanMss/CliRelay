@@ -485,6 +485,54 @@ func TestCORSMiddlewareAllowsConfiguredOrigin(t *testing.T) {
 	}
 }
 
+func TestCORSMiddlewareAllowsChromeExtensionOriginByDefault(t *testing.T) {
+	server := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodOptions, "/v1/models", nil)
+	req.Header.Set("Origin", "chrome-extension://abcdefghijklmnop")
+
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusNoContent, rr.Body.String())
+	}
+	if got := rr.Header().Get("Access-Control-Allow-Origin"); got != "chrome-extension://abcdefghijklmnop" {
+		t.Fatalf("Access-Control-Allow-Origin = %q", got)
+	}
+}
+
+func TestCORSMiddlewareUsesUpdatedCORSAllowOrigins(t *testing.T) {
+	server := newTestServer(t)
+
+	reqBefore := httptest.NewRequest(http.MethodOptions, "/v1/models", nil)
+	reqBefore.Header.Set("Origin", "https://plugin.example")
+
+	rrBefore := httptest.NewRecorder()
+	server.engine.ServeHTTP(rrBefore, reqBefore)
+
+	if rrBefore.Code != http.StatusForbidden {
+		t.Fatalf("before status = %d, want %d; body=%s", rrBefore.Code, http.StatusForbidden, rrBefore.Body.String())
+	}
+
+	next := *server.cfg
+	next.CORSAllowOrigins = []string{"https://plugin.example"}
+	server.UpdateClients(&next)
+
+	reqAfter := httptest.NewRequest(http.MethodOptions, "/v1/models", nil)
+	reqAfter.Header.Set("Origin", "https://plugin.example")
+
+	rrAfter := httptest.NewRecorder()
+	server.engine.ServeHTTP(rrAfter, reqAfter)
+
+	if rrAfter.Code != http.StatusNoContent {
+		t.Fatalf("after status = %d, want %d; body=%s", rrAfter.Code, http.StatusNoContent, rrAfter.Body.String())
+	}
+	if got := rrAfter.Header().Get("Access-Control-Allow-Origin"); got != "https://plugin.example" {
+		t.Fatalf("Access-Control-Allow-Origin = %q", got)
+	}
+}
+
 func TestManagementRemoteRestrictionIgnoresForgedForwardedFor(t *testing.T) {
 	server := newTestServerWithConfig(t, func(cfg *proxyconfig.Config) {
 		cfg.RemoteManagement.SecretKey = "test-secret"
