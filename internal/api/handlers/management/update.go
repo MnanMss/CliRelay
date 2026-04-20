@@ -23,6 +23,7 @@ const (
 	updateHTTPTimeout     = 10 * time.Second
 	updaterHealthTimeout  = 2 * time.Second
 	updaterTokenEnv       = "CLIRELAY_UPDATER_TOKEN"
+	githubTokenEnv        = "CLIRELAY_GITHUB_TOKEN"
 	autoUpdateChannelEnv  = "CLIRELAY_UPDATE_CHANNEL"
 	defaultUpdaterService = "clirelay"
 )
@@ -57,6 +58,11 @@ type branchCommitInfo struct {
 		Message string `json:"message"`
 	} `json:"commit"`
 }
+
+var (
+	fetchBranchCommitForUpdateCheck      = fetchBranchCommit
+	fetchLatestReleaseInfoForUpdateCheck = fetchLatestReleaseInfo
+)
 
 func (h *Handler) GetAutoUpdateEnabled(c *gin.Context) {
 	enabled := true
@@ -177,56 +183,87 @@ func (h *Handler) buildUpdateCheck(ctx context.Context) (*updateCheckResponse, e
 		channel = inferAutoUpdateChannel(buildinfo.Version, os.Getenv(autoUpdateChannelEnv))
 	}
 	repo := normalizeGitHubRepository(cfg.AutoUpdate.Repository)
-	frontendRepo := normalizeGitHubRepository(config.DefaultPanelGitHubRepository)
+	frontendRepo := normalizeGitHubRepository(cfg.RemoteManagement.PanelGitHubRepository)
 	client := h.githubClient()
 
-	branch, err := fetchBranchCommit(ctx, client, repo, channel)
-	if err != nil {
-		return nil, err
-	}
-	frontendBranch, err := fetchBranchCommit(ctx, client, frontendRepo, channel)
-	if err != nil {
-		return nil, err
-	}
+	branch, branchErr := fetchBranchCommitForUpdateCheck(ctx, client, repo, channel)
+	frontendBranch, frontendErr := fetchBranchCommitForUpdateCheck(ctx, client, frontendRepo, channel)
 
-	release, releaseErr := fetchLatestReleaseInfo(ctx, client, repo)
+	release, releaseErr := fetchLatestReleaseInfoForUpdateCheck(ctx, client, repo)
 	releaseNotes := strings.TrimSpace(release.Body)
 	if releaseErr != nil {
 		releaseNotes = ""
 	}
 
+	currentVersion := currentUpdateDisplayVersion(buildinfo.Version)
+	currentCommit := strings.TrimSpace(buildinfo.Commit)
+	currentUIVersion := currentFrontendDisplayVersion(buildinfo.FrontendVersion, buildinfo.FrontendRef, buildinfo.FrontendCommit)
+	currentUICommit := strings.TrimSpace(buildinfo.FrontendCommit)
+
+	latestVersion := currentVersion
+	latestCommit := currentCommit
+	latestCommitURL := ""
+	if branchErr == nil {
+		latestVersion = latestUpdateDisplayVersion(channel, branch.SHA)
+		latestCommit = strings.TrimSpace(branch.SHA)
+		latestCommitURL = strings.TrimSpace(branch.HTMLURL)
+	}
+
+	latestUIVersion := currentUIVersion
+	latestUICommit := currentUICommit
+	latestUICommitURL := ""
+	if frontendErr == nil {
+		latestUIVersion = latestFrontendDisplayVersion(channel, frontendBranch.SHA)
+		latestUICommit = strings.TrimSpace(frontendBranch.SHA)
+		latestUICommitURL = strings.TrimSpace(frontendBranch.HTMLURL)
+	}
+
+	backendUpdateAvailable := branchErr == nil && autoUpdateAvailableFromCommit(currentCommit, branch.SHA)
+	frontendUpdateAvailable := frontendErr == nil && autoUpdateAvailableFromCommit(currentUICommit, frontendBranch.SHA)
+
 	resp := &updateCheckResponse{
 		Enabled:           cfg.AutoUpdate.Enabled,
-		CurrentVersion:    currentUpdateDisplayVersion(buildinfo.Version),
-		CurrentCommit:     buildinfo.Commit,
-		CurrentUIVersion:  currentFrontendDisplayVersion(buildinfo.FrontendVersion, buildinfo.FrontendRef, buildinfo.FrontendCommit),
-		CurrentUICommit:   buildinfo.FrontendCommit,
+		CurrentVersion:    currentVersion,
+		CurrentCommit:     currentCommit,
+		CurrentUIVersion:  currentUIVersion,
+		CurrentUICommit:   currentUICommit,
 		BuildDate:         buildinfo.BuildDate,
 		TargetChannel:     channel,
-		LatestVersion:     latestUpdateDisplayVersion(channel, branch.SHA),
-		LatestCommit:      strings.TrimSpace(branch.SHA),
-		LatestCommitURL:   strings.TrimSpace(branch.HTMLURL),
-		LatestUIVersion:   latestFrontendDisplayVersion(channel, frontendBranch.SHA),
-		LatestUICommit:    strings.TrimSpace(frontendBranch.SHA),
-		LatestUICommitURL: strings.TrimSpace(frontendBranch.HTMLURL),
+		LatestVersion:     latestVersion,
+		LatestCommit:      latestCommit,
+		LatestCommitURL:   latestCommitURL,
+		LatestUIVersion:   latestUIVersion,
+		LatestUICommit:    latestUICommit,
+		LatestUICommitURL: latestUICommitURL,
 		DockerImage:       cfg.AutoUpdate.DockerImage,
 		DockerTag:         dockerTagForChannel(channel, branch.SHA),
 		ReleaseNotes:      releaseNotes,
 		ReleaseURL:        strings.TrimSpace(release.HTMLURL),
-		UpdateAvailable: cfg.AutoUpdate.Enabled && autoUpdateAvailable(
-			buildinfo.Commit,
-			branch.SHA,
-			buildinfo.FrontendCommit,
-			frontendBranch.SHA,
-		),
-		UpdaterAvailable: checkUpdaterAvailable(ctx, cfg),
+		UpdateAvailable:   cfg.AutoUpdate.Enabled && (backendUpdateAvailable || frontendUpdateAvailable),
+		UpdaterAvailable:  checkUpdaterAvailable(ctx, cfg),
 	}
 	if !resp.Enabled {
 		resp.Message = "auto update disabled"
+	} else if branchErr != nil || frontendErr != nil {
+		resp.Message = buildUpdateCheckWarning(branchErr, frontendErr)
 	} else if !resp.UpdateAvailable {
 		resp.Message = "already up to date"
 	}
 	return resp, nil
+}
+
+func buildUpdateCheckWarning(branchErr error, frontendErr error) string {
+	parts := make([]string, 0, 2)
+	if branchErr != nil {
+		parts = append(parts, "service update check degraded: "+strings.TrimSpace(branchErr.Error()))
+	}
+	if frontendErr != nil {
+		parts = append(parts, "management UI update check degraded: "+strings.TrimSpace(frontendErr.Error()))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, "; ")
 }
 
 func (h *Handler) githubClient() *http.Client {
@@ -255,8 +292,7 @@ func fetchBranchCommit(ctx context.Context, client *http.Client, repo string, ch
 	if err != nil {
 		return info, err
 	}
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("User-Agent", latestReleaseUserAgent)
+	applyGitHubAPIHeaders(req)
 	resp, err := client.Do(req)
 	if err != nil {
 		return info, err
@@ -281,8 +317,7 @@ func fetchLatestReleaseInfo(ctx context.Context, client *http.Client, repo strin
 	if err != nil {
 		return info, err
 	}
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("User-Agent", latestReleaseUserAgent)
+	applyGitHubAPIHeaders(req)
 	resp, err := client.Do(req)
 	if err != nil {
 		return info, err
@@ -400,6 +435,24 @@ func normalizeGitHubRepository(repo string) string {
 
 func githubAPIURL(repo string, path string) string {
 	return "https://api.github.com/repos/" + strings.Trim(repo, "/") + "/" + strings.TrimLeft(path, "/")
+}
+
+func applyGitHubAPIHeaders(req *http.Request) {
+	if req == nil {
+		return
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("User-Agent", latestReleaseUserAgent)
+	if token := githubAPIToken(); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+}
+
+func githubAPIToken() string {
+	if token := strings.TrimSpace(os.Getenv(githubTokenEnv)); token != "" {
+		return token
+	}
+	return strings.TrimSpace(os.Getenv("GITHUB_TOKEN"))
 }
 
 func resolveUpdaterURL(cfg *config.Config) string {

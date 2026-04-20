@@ -1,10 +1,14 @@
 package management
 
 import (
+	"context"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -175,5 +179,125 @@ func TestAutoUpdateChannelEndpoints(t *testing.T) {
 	}
 	if cfg.AutoUpdate.Channel != "dev" {
 		t.Fatalf("AutoUpdate.Channel = %q, want dev", cfg.AutoUpdate.Channel)
+	}
+}
+
+func TestBuildUpdateCheckGracefullyHandlesGitHubFailures(t *testing.T) {
+	origFetchBranchCommit := fetchBranchCommitForUpdateCheck
+	origFetchLatestRelease := fetchLatestReleaseInfoForUpdateCheck
+	t.Cleanup(func() {
+		fetchBranchCommitForUpdateCheck = origFetchBranchCommit
+		fetchLatestReleaseInfoForUpdateCheck = origFetchLatestRelease
+	})
+
+	fetchBranchCommitForUpdateCheck = func(ctx context.Context, client *http.Client, repo string, channel string) (branchCommitInfo, error) {
+		return branchCommitInfo{}, errors.New("github rate limit exceeded")
+	}
+	fetchLatestReleaseInfoForUpdateCheck = func(ctx context.Context, client *http.Client, repo string) (releaseInfo, error) {
+		return releaseInfo{}, errors.New("release unavailable")
+	}
+
+	cfg := &config.Config{}
+	cfg.AutoUpdate.Enabled = true
+	cfg.AutoUpdate.Channel = "dev"
+	cfg.AutoUpdate.Repository = "https://github.com/kittors/CliRelay"
+	cfg.RemoteManagement.PanelGitHubRepository = "https://github.com/kittors/codeProxy"
+
+	handler := &Handler{cfg: cfg}
+	resp, err := handler.buildUpdateCheck(context.Background())
+	if err != nil {
+		t.Fatalf("buildUpdateCheck() error = %v, want nil", err)
+	}
+	if resp == nil {
+		t.Fatal("buildUpdateCheck() returned nil response")
+	}
+	if resp.UpdateAvailable {
+		t.Fatalf("UpdateAvailable = true, want false when GitHub checks fail")
+	}
+	if !strings.Contains(strings.ToLower(resp.Message), "github") {
+		t.Fatalf("Message = %q, want GitHub failure context", resp.Message)
+	}
+	if resp.TargetChannel != "dev" {
+		t.Fatalf("TargetChannel = %q, want dev", resp.TargetChannel)
+	}
+	if resp.LatestVersion != resp.CurrentVersion {
+		t.Fatalf("LatestVersion = %q, want fallback current version %q", resp.LatestVersion, resp.CurrentVersion)
+	}
+	if resp.LatestUIVersion != resp.CurrentUIVersion {
+		t.Fatalf("LatestUIVersion = %q, want fallback current UI version %q", resp.LatestUIVersion, resp.CurrentUIVersion)
+	}
+}
+
+func TestBuildUpdateCheckUsesConfiguredPanelRepository(t *testing.T) {
+	origFetchBranchCommit := fetchBranchCommitForUpdateCheck
+	origFetchLatestRelease := fetchLatestReleaseInfoForUpdateCheck
+	t.Cleanup(func() {
+		fetchBranchCommitForUpdateCheck = origFetchBranchCommit
+		fetchLatestReleaseInfoForUpdateCheck = origFetchLatestRelease
+	})
+
+	var repos []string
+	fetchBranchCommitForUpdateCheck = func(ctx context.Context, client *http.Client, repo string, channel string) (branchCommitInfo, error) {
+		repos = append(repos, repo)
+		return branchCommitInfo{SHA: "abcdef1234567", HTMLURL: "https://example.com/" + repo}, nil
+	}
+	fetchLatestReleaseInfoForUpdateCheck = func(ctx context.Context, client *http.Client, repo string) (releaseInfo, error) {
+		return releaseInfo{}, nil
+	}
+
+	cfg := &config.Config{}
+	cfg.AutoUpdate.Enabled = true
+	cfg.AutoUpdate.Channel = "main"
+	cfg.AutoUpdate.Repository = "https://github.com/kittors/CliRelay"
+	cfg.RemoteManagement.PanelGitHubRepository = "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
+
+	handler := &Handler{cfg: cfg}
+	if _, err := handler.buildUpdateCheck(context.Background()); err != nil {
+		t.Fatalf("buildUpdateCheck() error = %v, want nil", err)
+	}
+
+	if !slices.Contains(repos, "kittors/CliRelay") {
+		t.Fatalf("repos = %v, want backend repo kittors/CliRelay", repos)
+	}
+	if !slices.Contains(repos, "router-for-me/Cli-Proxy-API-Management-Center") {
+		t.Fatalf("repos = %v, want configured panel repo", repos)
+	}
+	if slices.Contains(repos, "kittors/codeProxy") {
+		t.Fatalf("repos = %v, did not expect default panel repo when config overrides it", repos)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return fn(req)
+}
+
+func TestFetchBranchCommitUsesGitHubTokenWhenConfigured(t *testing.T) {
+	t.Setenv("CLIRELAY_GITHUB_TOKEN", "test-token")
+
+	var gotAuth string
+	client := &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			gotAuth = req.Header.Get("Authorization")
+			body := `{"sha":"abcdef1234567","html_url":"https://example.com/commit","commit":{"message":"ok"}}`
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(body)),
+				Request:    req,
+			}, nil
+		}),
+	}
+
+	info, err := fetchBranchCommit(context.Background(), client, "kittors/CliRelay", "dev")
+	if err != nil {
+		t.Fatalf("fetchBranchCommit() error = %v, want nil", err)
+	}
+	if info.SHA != "abcdef1234567" {
+		t.Fatalf("SHA = %q, want abcdef1234567", info.SHA)
+	}
+	if gotAuth != "Bearer test-token" {
+		t.Fatalf("Authorization = %q, want Bearer test-token", gotAuth)
 	}
 }
