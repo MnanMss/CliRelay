@@ -362,11 +362,13 @@ func (s *Server) setupRoutes() {
 	geminiCLIHandlers := gemini.NewGeminiCLIAPIHandler(s.handlers)
 	claudeCodeHandlers := claude.NewClaudeCodeAPIHandler(s.handlers)
 	openaiResponsesHandlers := openai.NewOpenAIResponsesAPIHandler(s.handlers)
+	openaiImagesHandlers := openai.NewOpenAIImagesAPIHandler(s.handlers)
 
 	registerV1Routes := func(group *gin.RouterGroup) {
 		group.GET("/models", s.unifiedModelsHandler(openaiHandlers, claudeCodeHandlers))
 		group.POST("/chat/completions", openaiHandlers.ChatCompletions)
 		group.POST("/completions", openaiHandlers.Completions)
+		group.POST("/images/generations", openaiImagesHandlers.Generations)
 		group.POST("/messages", claudeCodeHandlers.ClaudeMessages)
 		group.POST("/messages/count_tokens", claudeCodeHandlers.ClaudeCountTokens)
 		group.GET("/responses", func(c *gin.Context) {
@@ -460,6 +462,7 @@ func (s *Server) setupRoutes() {
 			"endpoints": []string{
 				"POST /v1/chat/completions",
 				"POST /v1/completions",
+				"POST /v1/images/generations",
 				"GET /v1/models",
 			},
 		})
@@ -766,6 +769,8 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/auth-files", s.mgmt.ListAuthFiles)
 		mgmt.GET("/auth-files/models", s.mgmt.GetAuthFileModels)
 		mgmt.GET("/model-definitions/:channel", s.mgmt.GetStaticModelDefinitions)
+		mgmt.GET("/image-generation/channels", s.mgmt.ListImageGenerationChannels)
+		mgmt.POST("/image-generation/test", s.mgmt.PostImageGenerationTest)
 		mgmt.GET("/auth-files/download", s.mgmt.DownloadAuthFile)
 		mgmt.POST("/auth-files", s.mgmt.UploadAuthFile)
 		mgmt.DELETE("/auth-files", s.mgmt.DeleteAuthFile)

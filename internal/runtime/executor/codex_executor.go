@@ -119,6 +119,9 @@ func (e *CodexExecutor) ProbeQuotaRecovery(ctx context.Context, auth *cliproxyau
 }
 
 func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+	if opts.Alt == codexImageGenerationAlt {
+		return e.executeImageGeneration(ctx, auth, req, opts)
+	}
 	if opts.Alt == "responses/compact" {
 		return e.executeCompact(ctx, auth, req, opts)
 	}
