@@ -52,6 +52,8 @@ type updaterServer struct {
 	mu             sync.Mutex
 	runID          uint64
 	status         updateStatusResponse
+	pullSkipped    bool
+	pullSkipLog    string
 }
 
 type updateLogEntry struct {
@@ -197,6 +199,11 @@ func (s *updaterServer) handleUpdate(w http.ResponseWriter, r *http.Request) {
 			s.finishUpdate(runID, "failed", "failed", err.Error())
 			return
 		}
+		if message, skipped := s.pullSkipFailure(runID); skipped {
+			reporter.Stage("failed", message)
+			s.finishUpdate(runID, "failed", "failed", message)
+			return
+		}
 		reporter.Stage("completed", "update completed")
 		s.finishUpdate(runID, "completed", "completed", "update completed")
 	}()
@@ -301,6 +308,8 @@ func (s *updaterServer) startUpdate(service string, req updateRequest) uint64 {
 		UpdatedAt:       now,
 		Logs:            nil,
 	}
+	s.pullSkipped = false
+	s.pullSkipLog = ""
 	return s.runID
 }
 
@@ -326,6 +335,12 @@ func (s *updaterServer) appendLog(runID uint64, stream string, message string) {
 	defer s.mu.Unlock()
 	if runID != s.runID {
 		return
+	}
+	if s.status.Stage == "pulling" && strings.Contains(trimmed, "Skipped") {
+		s.pullSkipped = true
+		if s.pullSkipLog == "" {
+			s.pullSkipLog = trimmed
+		}
 	}
 	s.status.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 	s.status.Logs = append(s.status.Logs, updateLogEntry{
@@ -371,6 +386,19 @@ func (s *updaterServer) snapshot() updateStatusResponse {
 		snapshot.Logs = append([]updateLogEntry(nil), s.status.Logs...)
 	}
 	return snapshot
+}
+
+func (s *updaterServer) pullSkipFailure(runID uint64) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if runID != s.runID || !s.pullSkipped {
+		return "", false
+	}
+	message := "docker compose pull skipped the target service; check pull policy and image refresh settings"
+	if strings.TrimSpace(s.pullSkipLog) != "" {
+		message += ": " + strings.TrimSpace(s.pullSkipLog)
+	}
+	return message, true
 }
 
 type updaterRunReporter struct {
