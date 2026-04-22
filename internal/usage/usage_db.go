@@ -624,8 +624,11 @@ type dashboardBucket struct {
 	totalToken int64
 }
 
+const dashboardThroughputBucketCount = 7
+
 // QueryDashboardTrends returns fixed-width trend buckets used by the dashboard.
-// days=1 is hourly, while multi-day ranges are daily.
+// KPI trends follow the selected day range, while throughput always shows the
+// most recent 7 one-minute buckets.
 func QueryDashboardTrends(days int) (DashboardTrends, error) {
 	db := getDB()
 	if db == nil {
@@ -683,14 +686,24 @@ func QueryDashboardTrends(days int) (DashboardTrends, error) {
 		return DashboardTrends{}, fmt.Errorf("usage: iterate dashboard trends: %w", err)
 	}
 
-	return dashboardTrendsFromBuckets(buckets), nil
+	throughputSeries, err := queryDashboardThroughputSeriesAt(time.Now(), loc)
+	if err != nil {
+		return DashboardTrends{}, err
+	}
+
+	trends := dashboardTrendsFromBuckets(buckets)
+	trends.ThroughputSeries = throughputSeries
+	return trends, nil
 }
 
 func emptyDashboardTrends(days int) DashboardTrends {
 	if days < 1 {
 		days = 7
 	}
-	return dashboardTrendsFromBuckets(buildDashboardBuckets(days, getUsageLocation()))
+	loc := getUsageLocation()
+	trends := dashboardTrendsFromBuckets(buildDashboardBuckets(days, loc))
+	trends.ThroughputSeries = throughputSeriesFromBuckets(buildRecentThroughputBucketsAt(time.Now(), loc))
+	return trends
 }
 
 func buildDashboardBuckets(days int, loc *time.Location) []dashboardBucket {
@@ -730,13 +743,85 @@ func dashboardBucketKey(t time.Time, days int) string {
 	return t.Format("2006-01-02")
 }
 
+func buildRecentThroughputBucketsAt(now time.Time, loc *time.Location) []dashboardBucket {
+	if loc == nil {
+		loc = time.Local
+	}
+	currentMinute := now.In(loc).Truncate(time.Minute)
+	start := currentMinute.Add(-time.Duration(dashboardThroughputBucketCount-1) * time.Minute)
+	buckets := make([]dashboardBucket, 0, dashboardThroughputBucketCount)
+	for i := 0; i < dashboardThroughputBucketCount; i++ {
+		at := start.Add(time.Duration(i) * time.Minute)
+		buckets = append(buckets, dashboardBucket{
+			label:   at.Format("15:04"),
+			key:     at.Format("2006-01-02 15:04"),
+			minutes: 1,
+		})
+	}
+	return buckets
+}
+
+func queryDashboardThroughputSeriesAt(now time.Time, loc *time.Location) ([]DashboardThroughputPoint, error) {
+	db := getDB()
+	if db == nil {
+		return throughputSeriesFromBuckets(buildRecentThroughputBucketsAt(now, loc)), nil
+	}
+	if loc == nil {
+		loc = time.Local
+	}
+
+	buckets := buildRecentThroughputBucketsAt(now, loc)
+	byKey := make(map[string]*dashboardBucket, len(buckets))
+	for i := range buckets {
+		byKey[buckets[i].key] = &buckets[i]
+	}
+
+	start := now.In(loc).Truncate(time.Minute).Add(-time.Duration(dashboardThroughputBucketCount-1) * time.Minute)
+	rows, err := db.Query(`
+		SELECT timestamp, total_tokens
+		FROM request_logs
+		WHERE timestamp >= ?
+	`, start.UTC().Format(time.RFC3339))
+	if err != nil {
+		return nil, fmt.Errorf("usage: query dashboard throughput trends: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var ts string
+		var totalTokens int64
+		if err := rows.Scan(&ts, &totalTokens); err != nil {
+			return nil, fmt.Errorf("usage: scan dashboard throughput row: %w", err)
+		}
+		parsed, err := time.Parse(time.RFC3339Nano, ts)
+		if err != nil {
+			parsed, err = time.Parse(time.RFC3339, ts)
+			if err != nil {
+				continue
+			}
+		}
+		key := parsed.In(loc).Truncate(time.Minute).Format("2006-01-02 15:04")
+		bucket := byKey[key]
+		if bucket == nil {
+			continue
+		}
+		bucket.requests++
+		bucket.totalToken += totalTokens
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("usage: iterate dashboard throughput rows: %w", err)
+	}
+
+	return throughputSeriesFromBuckets(buckets), nil
+}
+
 func dashboardTrendsFromBuckets(buckets []dashboardBucket) DashboardTrends {
 	trends := DashboardTrends{
 		RequestVolume:    make([]DashboardTrendPoint, 0, len(buckets)),
 		SuccessRate:      make([]DashboardTrendPoint, 0, len(buckets)),
 		TotalTokens:      make([]DashboardTrendPoint, 0, len(buckets)),
 		FailedRequests:   make([]DashboardTrendPoint, 0, len(buckets)),
-		ThroughputSeries: make([]DashboardThroughputPoint, 0, len(buckets)),
+		ThroughputSeries: make([]DashboardThroughputPoint, 0, 0),
 	}
 
 	for _, bucket := range buckets {
@@ -744,21 +829,32 @@ func dashboardTrendsFromBuckets(buckets []dashboardBucket) DashboardTrends {
 		if bucket.requests > 0 {
 			successRate = float64(bucket.success) / float64(bucket.requests) * 100
 		}
+
+		trends.RequestVolume = append(trends.RequestVolume, DashboardTrendPoint{Label: bucket.label, Value: float64(bucket.requests)})
+		trends.SuccessRate = append(trends.SuccessRate, DashboardTrendPoint{Label: bucket.label, Value: successRate})
+		trends.TotalTokens = append(trends.TotalTokens, DashboardTrendPoint{Label: bucket.label, Value: float64(bucket.totalToken)})
+		trends.FailedRequests = append(trends.FailedRequests, DashboardTrendPoint{Label: bucket.label, Value: float64(bucket.failed)})
+	}
+
+	return trends
+}
+
+func throughputSeriesFromBuckets(buckets []dashboardBucket) []DashboardThroughputPoint {
+	points := make([]DashboardThroughputPoint, 0, len(buckets))
+	for _, bucket := range buckets {
 		rpm := 0.0
 		tpm := 0.0
 		if bucket.minutes > 0 {
 			rpm = float64(bucket.requests) / bucket.minutes
 			tpm = float64(bucket.totalToken) / bucket.minutes
 		}
-
-		trends.RequestVolume = append(trends.RequestVolume, DashboardTrendPoint{Label: bucket.label, Value: float64(bucket.requests)})
-		trends.SuccessRate = append(trends.SuccessRate, DashboardTrendPoint{Label: bucket.label, Value: successRate})
-		trends.TotalTokens = append(trends.TotalTokens, DashboardTrendPoint{Label: bucket.label, Value: float64(bucket.totalToken)})
-		trends.FailedRequests = append(trends.FailedRequests, DashboardTrendPoint{Label: bucket.label, Value: float64(bucket.failed)})
-		trends.ThroughputSeries = append(trends.ThroughputSeries, DashboardThroughputPoint{Label: bucket.label, RPM: rpm, TPM: tpm})
+		points = append(points, DashboardThroughputPoint{
+			Label: bucket.label,
+			RPM:   rpm,
+			TPM:   tpm,
+		})
 	}
-
-	return trends
+	return points
 }
 
 // MigrateFromSnapshot imports all request details from an existing
