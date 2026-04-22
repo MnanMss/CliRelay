@@ -273,6 +273,46 @@ func TestBuildChannelGroupItemsCanonicalizesRenamedOAuthChannel(t *testing.T) {
 	}
 }
 
+func TestBuildChannelGroupItemsSkipsDisabledAuthChannels(t *testing.T) {
+	auths := []*coreauth.Auth{
+		{
+			ID:       "active-auth",
+			Label:    "Active Channel",
+			Prefix:   "team-a",
+			Provider: "codex",
+		},
+		{
+			ID:            "deleted-auth",
+			Label:         "Deleted Channel",
+			Prefix:        "team-b",
+			Provider:      "claude",
+			Disabled:      true,
+			Status:        coreauth.StatusDisabled,
+			StatusMessage: "removed via management api",
+		},
+	}
+
+	items := buildChannelGroupItems(&config.Config{}, auths)
+	byName := make(map[string]channelGroupItem, len(items))
+	for _, item := range items {
+		byName[item.Name] = item
+	}
+
+	teamA, ok := byName["team-a"]
+	if !ok {
+		t.Fatal("expected active team-a group")
+	}
+	if !containsString(teamA.Channels, "Active Channel") {
+		t.Fatalf("team-a channels = %v, want Active Channel", teamA.Channels)
+	}
+	if containsString(teamA.Channels, "Deleted Channel") {
+		t.Fatalf("team-a channels = %v, should not contain deleted channel", teamA.Channels)
+	}
+	if _, exists := byName["team-b"]; exists {
+		t.Fatalf("unexpected lingering team-b group from deleted auth: %v", byName["team-b"])
+	}
+}
+
 func TestCanonicalizeRoutingConfigChannelsRenamedOAuthChannel(t *testing.T) {
 	cfg := &config.Config{
 		Routing: config.RoutingConfig{

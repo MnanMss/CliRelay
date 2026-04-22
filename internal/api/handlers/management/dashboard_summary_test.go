@@ -82,3 +82,43 @@ func TestGetDashboardSummaryIncludesTrendsAndMeta(t *testing.T) {
 		t.Fatalf("meta.generated_at is empty")
 	}
 }
+
+func TestGetDashboardSummaryCountsAPIKeysFromSQLite(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	dbPath := filepath.Join(t.TempDir(), "usage.db")
+	if err := usage.InitDB(dbPath, config.RequestLogStorageConfig{StoreContent: false}, time.UTC); err != nil {
+		t.Fatalf("InitDB: %v", err)
+	}
+	t.Cleanup(usage.CloseDB)
+
+	for _, key := range []string{"sk-one", "sk-two", "sk-three"} {
+		if err := usage.UpsertAPIKey(usage.APIKeyRow{Key: key, Name: key}); err != nil {
+			t.Fatalf("UpsertAPIKey(%q): %v", key, err)
+		}
+	}
+
+	h := &Handler{cfg: &config.Config{}}
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/dashboard-summary?days=7", nil)
+
+	h.GetDashboardSummary(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d, body=%s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+
+	var payload struct {
+		Counts struct {
+			APIKeys int `json:"api_keys"`
+		} `json:"counts"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+
+	if payload.Counts.APIKeys != 3 {
+		t.Fatalf("counts.api_keys = %d, want 3", payload.Counts.APIKeys)
+	}
+}

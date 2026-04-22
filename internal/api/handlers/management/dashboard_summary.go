@@ -32,8 +32,8 @@ func (h *Handler) GetDashboardSummary(c *gin.Context) {
 		codexCount = len(cfg.CodexKey)
 		vertexCount = len(cfg.VertexCompatAPIKey)
 		openaiCount = len(cfg.OpenAICompatibility)
-		apiKeyCount = len(cfg.APIKeyEntries)
 	}
+	apiKeyCount = len(usage.ListAPIKeys())
 
 	if h.authManager != nil {
 		for _, auth := range h.authManager.List() {

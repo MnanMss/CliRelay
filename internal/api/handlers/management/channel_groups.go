@@ -58,13 +58,20 @@ func collectChannelDescriptors(cfg *config.Config, auths []*coreauth.Auth) []cha
 	}
 
 	for _, auth := range auths {
-		if auth == nil {
+		if !includeAuthInChannelGroups(auth) {
 			continue
 		}
 		push(auth.ChannelName(), auth.Prefix, auth.Provider)
 	}
 
 	return items
+}
+
+func includeAuthInChannelGroups(auth *coreauth.Auth) bool {
+	if auth == nil {
+		return false
+	}
+	return !auth.Disabled && auth.Status != coreauth.StatusDisabled
 }
 
 func buildChannelGroupItems(cfg *config.Config, auths []*coreauth.Auth) []channelGroupItem {
