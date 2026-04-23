@@ -18,6 +18,7 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 	"golang.org/x/crypto/sha3"
 )
 
@@ -26,8 +27,10 @@ const (
 	codexImageBackendUserAgent   = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 	codexImageRequirementsDiff   = "0fffff"
 	codexImageGenerationAlt      = "images/generations"
+	codexImageEditsAlt           = "images/edits"
 	codexImageDefaultPrompt      = "Generate an image."
 	codexImageConversationTimout = 180 * time.Second
+	codexImageMaxN               = 4
 )
 
 var codexImageChatGPTBaseURL = "https://chatgpt.com"
@@ -36,8 +39,29 @@ type codexImageRequest struct {
 	Model          string
 	Prompt         string
 	N              int
+	Size           string
+	Quality        string
 	Stream         bool
 	ResponseFormat string
+	Uploads        []codexImageUpload
+}
+
+type codexImageUpload struct {
+	FileName    string `json:"file_name"`
+	ContentType string `json:"content_type"`
+	DataBase64  string `json:"data_base64,omitempty"`
+	Data        []byte `json:"-"`
+	Width       int    `json:"width,omitempty"`
+	Height      int    `json:"height,omitempty"`
+}
+
+type codexUploadedImage struct {
+	FileID      string
+	FileName    string
+	FileSize    int
+	ContentType string
+	Width       int
+	Height      int
 }
 
 type codexChatRequirements struct {
@@ -58,13 +82,16 @@ type codexImagePointer struct {
 }
 
 func (e *CodexExecutor) executeImageGeneration(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
-	_ = opts
 	parsed, err := parseCodexImageRequest(req.Payload)
 	if err != nil {
 		return cliproxyexecutor.Response{}, statusErr{code: http.StatusBadRequest, msg: err.Error()}
 	}
+	if opts.Alt == codexImageEditsAlt && len(parsed.Uploads) == 0 {
+		return cliproxyexecutor.Response{}, statusErr{code: http.StatusBadRequest, msg: "image file is required for image edits"}
+	}
 	reporter := newUsageReporter(ctx, e.Identifier(), parsed.Model, auth)
-	reporter.setInputContent(string(req.Payload))
+	inputForLog := sanitizeCodexImageRequestForLog(req.Payload)
+	reporter.setInputContent(inputForLog)
 	defer reporter.trackFailure(ctx, &err)
 	apiKey, _ := codexCreds(auth)
 	if strings.TrimSpace(apiKey) == "" {
@@ -93,15 +120,50 @@ func (e *CodexExecutor) executeImageGeneration(ctx context.Context, auth *clipro
 		return cliproxyexecutor.Response{}, statusErr{code: http.StatusForbidden, msg: "chat-requirements requires unsupported challenge (arkose)"}
 	}
 
-	parentMessageID := uuid.NewString()
 	proofToken := generateCodexImageProofToken(chatReqs.ProofOfWork.Required, chatReqs.ProofOfWork.Seed, chatReqs.ProofOfWork.Difficulty, headers.Get("User-Agent"))
-	_ = initializeCodexImageConversation(ctxRequest, httpClient, headers)
-	conduitToken, err := prepareCodexImageConversation(ctxRequest, httpClient, headers, parsed.Prompt, parentMessageID, chatReqs.Token, proofToken)
+	payloads := make([][]byte, 0, parsed.N)
+	var responseHeaders http.Header
+	for i := 0; i < parsed.N; i++ {
+		payload, headers, runErr := e.executeCodexImageOnce(ctxRequest, httpClient, headers, parsed, chatReqs, proofToken, i)
+		if runErr != nil {
+			return cliproxyexecutor.Response{}, runErr
+		}
+		payloads = append(payloads, payload)
+		responseHeaders = headers
+	}
+
+	payload, err := mergeCodexImageOpenAIResponses(payloads)
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
+	reporter.publishWithContent(ctxRequest, parseOpenAIUsage(payload), inputForLog, string(payload))
+	reporter.ensurePublished(ctxRequest)
+	return cliproxyexecutor.Response{Payload: payload, Headers: responseHeaders}, nil
+}
 
-	convReq := buildCodexImageConversationRequest(parsed.Prompt, parentMessageID)
+func (e *CodexExecutor) executeCodexImageOnce(
+	ctx context.Context,
+	httpClient *http.Client,
+	headers http.Header,
+	parsed *codexImageRequest,
+	chatReqs *codexChatRequirements,
+	proofToken string,
+	index int,
+) ([]byte, http.Header, error) {
+	parentMessageID := uuid.NewString()
+	prompt := buildCodexImagePrompt(parsed, index)
+	_ = initializeCodexImageConversation(ctx, httpClient, headers)
+	conduitToken, err := prepareCodexImageConversation(ctx, httpClient, headers, prompt, parentMessageID, chatReqs.Token, proofToken)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	uploads, err := uploadCodexImageFiles(ctx, httpClient, headers, parsed.Uploads)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	convReq := buildCodexImageConversationRequest(prompt, parentMessageID, uploads)
 	convHeaders := cloneHeader(headers)
 	convHeaders.Set("Accept", "text/event-stream")
 	convHeaders.Set("Content-Type", "application/json")
@@ -114,9 +176,9 @@ func (e *CodexExecutor) executeImageGeneration(ctx context.Context, auth *clipro
 	}
 
 	body, _ := json.Marshal(convReq)
-	httpResp, err := doCodexImageJSON(ctxRequest, httpClient, http.MethodPost, codexImageURL("/backend-api/f/conversation"), convHeaders, body)
+	httpResp, err := doCodexImageJSON(ctx, httpClient, http.MethodPost, codexImageURL("/backend-api/f/conversation"), convHeaders, body)
 	if err != nil {
-		return cliproxyexecutor.Response{}, err
+		return nil, nil, err
 	}
 	defer func() {
 		if httpResp != nil && httpResp.Body != nil {
@@ -124,32 +186,30 @@ func (e *CodexExecutor) executeImageGeneration(ctx context.Context, auth *clipro
 		}
 	}()
 	if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
-		return cliproxyexecutor.Response{}, codexImageStatusErr(httpResp, "openai image conversation request failed")
+		return nil, nil, codexImageStatusErr(httpResp, "openai image conversation request failed")
 	}
 
 	conversationID, pointers, err := readCodexImageConversationStream(httpResp.Body)
 	if err != nil {
-		return cliproxyexecutor.Response{}, err
+		return nil, nil, err
 	}
 	if conversationID != "" && !hasCodexFileServicePointer(pointers) {
-		polled, pollErr := pollCodexImageConversation(ctxRequest, httpClient, headers, conversationID)
+		polled, pollErr := pollCodexImageConversation(ctx, httpClient, headers, conversationID)
 		if pollErr != nil {
-			return cliproxyexecutor.Response{}, pollErr
+			return nil, nil, pollErr
 		}
 		pointers = mergeCodexImagePointers(pointers, polled)
 	}
 	pointers = preferCodexFileServicePointers(pointers)
 	if len(pointers) == 0 {
-		return cliproxyexecutor.Response{}, statusErr{code: http.StatusBadGateway, msg: "openai image conversation returned no downloadable images"}
+		return nil, nil, statusErr{code: http.StatusBadGateway, msg: "openai image conversation returned no downloadable images"}
 	}
 
-	payload, err := buildCodexImageOpenAIResponse(ctxRequest, httpClient, headers, conversationID, pointers)
+	payload, err := buildCodexImageOpenAIResponse(ctx, httpClient, headers, conversationID, pointers)
 	if err != nil {
-		return cliproxyexecutor.Response{}, err
+		return nil, nil, err
 	}
-	reporter.publishWithContent(ctxRequest, parseOpenAIUsage(payload), string(req.Payload), string(payload))
-	reporter.ensurePublished(ctxRequest)
-	return cliproxyexecutor.Response{Payload: payload, Headers: httpResp.Header.Clone()}, nil
+	return payload, httpResp.Header.Clone(), nil
 }
 
 func parseCodexImageRequest(body []byte) (*codexImageRequest, error) {
@@ -177,8 +237,8 @@ func parseCodexImageRequest(body []byte) (*codexImageRequest, error) {
 		}
 		parsed.N = int(nResult.Int())
 	}
-	if parsed.N != 1 {
-		return nil, fmt.Errorf("only n=1 is supported for Codex OAuth image generation")
+	if parsed.N < 1 || parsed.N > codexImageMaxN {
+		return nil, fmt.Errorf("n must be between 1 and %d for Codex OAuth image generation", codexImageMaxN)
 	}
 	if streamResult := gjson.GetBytes(body, "stream"); streamResult.Exists() {
 		if streamResult.Type != gjson.True && streamResult.Type != gjson.False {
@@ -193,10 +253,65 @@ func parseCodexImageRequest(body []byte) (*codexImageRequest, error) {
 	if parsed.ResponseFormat != "" && parsed.ResponseFormat != "b64_json" {
 		return nil, fmt.Errorf("only response_format=b64_json is supported for Codex OAuth image generation")
 	}
-	if size := strings.TrimSpace(gjson.GetBytes(body, "size").String()); size != "" {
-		return nil, fmt.Errorf("size is not supported for Codex OAuth image generation yet")
+	parsed.Size = strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "size").String()))
+	if parsed.Size != "" && !isSupportedCodexImageSize(parsed.Size) {
+		return nil, fmt.Errorf("size must be one of 1024x1024, 1792x1024, 1024x1792")
+	}
+	parsed.Quality = strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "quality").String()))
+	if parsed.Quality != "" && !isSupportedCodexImageQuality(parsed.Quality) {
+		return nil, fmt.Errorf("quality must be one of low, medium, high")
+	}
+	if uploadResult := gjson.GetBytes(body, "image_files"); uploadResult.Exists() {
+		if !uploadResult.IsArray() {
+			return nil, fmt.Errorf("image_files must be an array")
+		}
+		for _, item := range uploadResult.Array() {
+			upload := codexImageUpload{
+				FileName:    strings.TrimSpace(item.Get("file_name").String()),
+				ContentType: strings.TrimSpace(item.Get("content_type").String()),
+				DataBase64:  strings.TrimSpace(item.Get("data_base64").String()),
+				Width:       int(item.Get("width").Int()),
+				Height:      int(item.Get("height").Int()),
+			}
+			if upload.FileName == "" {
+				upload.FileName = "image.png"
+			}
+			if upload.ContentType == "" {
+				upload.ContentType = "application/octet-stream"
+			}
+			if upload.DataBase64 == "" {
+				return nil, fmt.Errorf("image_files[].data_base64 is required")
+			}
+			decoded, err := base64.StdEncoding.DecodeString(upload.DataBase64)
+			if err != nil {
+				return nil, fmt.Errorf("image_files[].data_base64 is invalid")
+			}
+			if len(decoded) == 0 {
+				return nil, fmt.Errorf("image_files[].data_base64 is empty")
+			}
+			upload.Data = decoded
+			parsed.Uploads = append(parsed.Uploads, upload)
+		}
 	}
 	return parsed, nil
+}
+
+func isSupportedCodexImageSize(size string) bool {
+	switch strings.ToLower(strings.TrimSpace(size)) {
+	case "1024x1024", "1792x1024", "1024x1792":
+		return true
+	default:
+		return false
+	}
+}
+
+func isSupportedCodexImageQuality(quality string) bool {
+	switch strings.ToLower(strings.TrimSpace(quality)) {
+	case "low", "medium", "high":
+		return true
+	default:
+		return false
+	}
 }
 
 func buildCodexImageBackendHeaders(auth *cliproxyauth.Auth, token string) http.Header {
@@ -383,7 +498,64 @@ func prepareCodexImageConversation(ctx context.Context, client *http.Client, hea
 	return strings.TrimSpace(result.ConduitToken), nil
 }
 
-func buildCodexImageConversationRequest(prompt, parentMessageID string) map[string]any {
+func buildCodexImagePrompt(parsed *codexImageRequest, index int) string {
+	if parsed == nil {
+		return codexImageDefaultPrompt
+	}
+	base := strings.TrimSpace(parsed.Prompt)
+	if base == "" {
+		base = codexImageDefaultPrompt
+	}
+	extras := make([]string, 0, 4)
+	if parsed.Size != "" {
+		extras = append(extras, "Preferred image size: "+parsed.Size+".")
+	}
+	if parsed.Quality != "" {
+		extras = append(extras, "Preferred render quality: "+parsed.Quality+".")
+	}
+	if parsed.N > 1 {
+		extras = append(extras, fmt.Sprintf("This is variation %d of %d. Keep it distinct while following the same prompt.", index+1, parsed.N))
+	}
+	if len(parsed.Uploads) > 0 {
+		extras = append(extras, "Use the attached image as the source reference and preserve the original composition unless the prompt says otherwise.")
+	}
+	if len(extras) == 0 {
+		return base
+	}
+	return base + "\n\n" + strings.Join(extras, "\n")
+}
+
+func buildCodexImageConversationRequest(prompt, parentMessageID string, uploads []codexUploadedImage) map[string]any {
+	parts := []any{coalesceCodexImageText(prompt, codexImageDefaultPrompt)}
+	contentType := "text"
+	attachments := make([]map[string]any, 0, len(uploads))
+	if len(uploads) > 0 {
+		contentType = "multimodal_text"
+		parts = make([]any, 0, len(uploads)+1)
+		for _, upload := range uploads {
+			parts = append(parts, map[string]any{
+				"content_type":  "image_asset_pointer",
+				"asset_pointer": "file-service://" + upload.FileID,
+				"size_bytes":    upload.FileSize,
+				"width":         upload.Width,
+				"height":        upload.Height,
+			})
+			attachment := map[string]any{
+				"id":       upload.FileID,
+				"mimeType": upload.ContentType,
+				"name":     upload.FileName,
+				"size":     upload.FileSize,
+			}
+			if upload.Width > 0 {
+				attachment["width"] = upload.Width
+			}
+			if upload.Height > 0 {
+				attachment["height"] = upload.Height
+			}
+			attachments = append(attachments, attachment)
+		}
+		parts = append(parts, coalesceCodexImageText(prompt, "Edit this image."))
+	}
 	metadata := map[string]any{
 		"developer_mode_connector_ids": []any{},
 		"selected_github_repos":        []any{},
@@ -397,11 +569,14 @@ func buildCodexImageConversationRequest(prompt, parentMessageID string) map[stri
 		"id":     uuid.NewString(),
 		"author": map[string]any{"role": "user"},
 		"content": map[string]any{
-			"content_type": "text",
-			"parts":        []any{coalesceCodexImageText(prompt, codexImageDefaultPrompt)},
+			"content_type": contentType,
+			"parts":        parts,
 		},
 		"metadata":    metadata,
 		"create_time": float64(time.Now().UnixMilli()) / 1000,
+	}
+	if len(attachments) > 0 {
+		metadata["attachments"] = attachments
 	}
 	return map[string]any{
 		"action":                               "next",
@@ -429,6 +604,155 @@ func buildCodexImageConversationRequest(prompt, parentMessageID string) map[stri
 		},
 		"messages": []any{message},
 	}
+}
+
+func uploadCodexImageFiles(ctx context.Context, client *http.Client, headers http.Header, uploads []codexImageUpload) ([]codexUploadedImage, error) {
+	if len(uploads) == 0 {
+		return nil, nil
+	}
+	results := make([]codexUploadedImage, 0, len(uploads))
+	for _, item := range uploads {
+		payload, _ := json.Marshal(map[string]any{
+			"file_name": codexImageCoalesce(item.FileName, "image.png"),
+			"file_size": len(item.Data),
+			"use_case":  "multimodal",
+		})
+		resp, err := doCodexImageJSON(ctx, client, http.MethodPost, codexImageURL("/backend-api/files"), headers, payload)
+		if err != nil {
+			return nil, err
+		}
+		respBody, readErr := readAndCloseCodexImageBody(resp)
+		if readErr != nil {
+			return nil, readErr
+		}
+		if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+			return nil, codexImageStatusErrWithBody(resp.StatusCode, respBody, "create upload slot failed")
+		}
+		var created struct {
+			FileID    string `json:"file_id"`
+			UploadURL string `json:"upload_url"`
+		}
+		if err := json.Unmarshal(respBody, &created); err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(created.FileID) == "" || strings.TrimSpace(created.UploadURL) == "" {
+			return nil, statusErr{code: http.StatusBadGateway, msg: "create upload slot failed"}
+		}
+
+		putReq, err := http.NewRequestWithContext(ctx, http.MethodPut, created.UploadURL, bytes.NewReader(item.Data))
+		if err != nil {
+			return nil, err
+		}
+		putReq.Header.Set("Content-Type", codexImageCoalesce(item.ContentType, "application/octet-stream"))
+		putReq.Header.Set("Origin", "https://chatgpt.com")
+		putReq.Header.Set("x-ms-blob-type", "BlockBlob")
+		putReq.Header.Set("x-ms-version", "2020-04-08")
+		putReq.Header.Set("User-Agent", headers.Get("User-Agent"))
+		putResp, err := client.Do(putReq)
+		if err != nil {
+			return nil, err
+		}
+		putBody, readErr := readAndCloseCodexImageBody(putResp)
+		if readErr != nil {
+			return nil, readErr
+		}
+		if putResp.StatusCode < http.StatusOK || putResp.StatusCode >= http.StatusMultipleChoices {
+			return nil, codexImageStatusErrWithBody(putResp.StatusCode, putBody, "upload image bytes failed")
+		}
+
+		donePayload, _ := json.Marshal(map[string]any{})
+		doneResp, err := doCodexImageJSON(ctx, client, http.MethodPost, codexImageURL("/backend-api/files/"+created.FileID+"/uploaded"), headers, donePayload)
+		if err != nil {
+			return nil, err
+		}
+		doneBody, readErr := readAndCloseCodexImageBody(doneResp)
+		if readErr != nil {
+			return nil, readErr
+		}
+		if doneResp.StatusCode < http.StatusOK || doneResp.StatusCode >= http.StatusMultipleChoices {
+			return nil, codexImageStatusErrWithBody(doneResp.StatusCode, doneBody, "mark upload complete failed")
+		}
+
+		results = append(results, codexUploadedImage{
+			FileID:      created.FileID,
+			FileName:    codexImageCoalesce(item.FileName, "image.png"),
+			FileSize:    len(item.Data),
+			ContentType: codexImageCoalesce(item.ContentType, "application/octet-stream"),
+			Width:       item.Width,
+			Height:      item.Height,
+		})
+	}
+	return results, nil
+}
+
+func codexImageCoalesce(value, fallback string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fallback
+	}
+	return value
+}
+
+func sanitizeCodexImageRequestForLog(body []byte) string {
+	if len(body) == 0 || !gjson.ValidBytes(body) {
+		return string(body)
+	}
+	sanitized := append([]byte(nil), body...)
+	if gjson.GetBytes(sanitized, "image_files").Exists() {
+		imageFiles := gjson.GetBytes(sanitized, "image_files").Array()
+		for i, item := range imageFiles {
+			size := 0
+			if data := item.Get("data_base64").String(); data != "" {
+				size = len(data)
+			}
+			replacement := map[string]any{
+				"file_name":    strings.TrimSpace(item.Get("file_name").String()),
+				"content_type": strings.TrimSpace(item.Get("content_type").String()),
+				"data_base64":  fmt.Sprintf("[omitted:%d chars]", size),
+			}
+			if width := item.Get("width").Int(); width > 0 {
+				replacement["width"] = width
+			}
+			if height := item.Get("height").Int(); height > 0 {
+				replacement["height"] = height
+			}
+			if updated, err := sjson.SetBytes(sanitized, fmt.Sprintf("image_files.%d", i), replacement); err == nil {
+				sanitized = updated
+			}
+		}
+	}
+	return string(sanitized)
+}
+
+func mergeCodexImageOpenAIResponses(payloads [][]byte) ([]byte, error) {
+	if len(payloads) == 0 {
+		return nil, fmt.Errorf("no image payloads to merge")
+	}
+	if len(payloads) == 1 {
+		return payloads[0], nil
+	}
+	type imageItem struct {
+		B64JSON       string `json:"b64_json,omitempty"`
+		RevisedPrompt string `json:"revised_prompt,omitempty"`
+	}
+	merged := struct {
+		Created int64       `json:"created"`
+		Data    []imageItem `json:"data"`
+	}{}
+	for _, payload := range payloads {
+		var item struct {
+			Created int64       `json:"created"`
+			Data    []imageItem `json:"data"`
+		}
+		if err := json.Unmarshal(payload, &item); err != nil {
+			return nil, err
+		}
+		if item.Created > merged.Created {
+			merged.Created = item.Created
+		}
+		merged.Data = append(merged.Data, item.Data...)
+	}
+	return json.Marshal(merged)
 }
 
 func doCodexImageJSON(ctx context.Context, client *http.Client, method, url string, headers http.Header, body []byte) (*http.Response, error) {

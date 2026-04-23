@@ -369,6 +369,7 @@ func (s *Server) setupRoutes() {
 		group.POST("/chat/completions", openaiHandlers.ChatCompletions)
 		group.POST("/completions", openaiHandlers.Completions)
 		group.POST("/images/generations", openaiImagesHandlers.Generations)
+		group.POST("/images/edits", openaiImagesHandlers.Edits)
 		group.POST("/messages", claudeCodeHandlers.ClaudeMessages)
 		group.POST("/messages/count_tokens", claudeCodeHandlers.ClaudeCountTokens)
 		group.GET("/responses", func(c *gin.Context) {

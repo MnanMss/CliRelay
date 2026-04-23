@@ -149,3 +149,60 @@ func TestCodexExecutorExecuteImageGeneration(t *testing.T) {
 		}
 	}
 }
+
+func TestParseCodexImageRequestAcceptsExtendedGenerationOptions(t *testing.T) {
+	parsed, err := parseCodexImageRequest([]byte(`{
+		"model":"gpt-image-2",
+		"prompt":"draw a fox",
+		"size":"1792x1024",
+		"quality":"high",
+		"n":3
+	}`))
+	if err != nil {
+		t.Fatalf("parseCodexImageRequest() error = %v", err)
+	}
+	if parsed.Model != "gpt-image-2" {
+		t.Fatalf("model = %q, want gpt-image-2", parsed.Model)
+	}
+	if parsed.Prompt != "draw a fox" {
+		t.Fatalf("prompt = %q, want draw a fox", parsed.Prompt)
+	}
+	if parsed.Size != "1792x1024" {
+		t.Fatalf("size = %q, want 1792x1024", parsed.Size)
+	}
+	if parsed.Quality != "high" {
+		t.Fatalf("quality = %q, want high", parsed.Quality)
+	}
+	if parsed.N != 3 {
+		t.Fatalf("n = %d, want 3", parsed.N)
+	}
+}
+
+func TestParseCodexImageRequestAcceptsImageEditsPayload(t *testing.T) {
+	parsed, err := parseCodexImageRequest([]byte(`{
+		"model":"gpt-image-2",
+		"prompt":"turn this into a blue icon",
+		"image_files":[
+			{
+				"file_name":"icon.png",
+				"content_type":"image/png",
+				"data_base64":"aGVsbG8="
+			}
+		]
+	}`))
+	if err != nil {
+		t.Fatalf("parseCodexImageRequest() error = %v", err)
+	}
+	if len(parsed.Uploads) != 1 {
+		t.Fatalf("uploads length = %d, want 1", len(parsed.Uploads))
+	}
+	if parsed.Uploads[0].FileName != "icon.png" {
+		t.Fatalf("file name = %q, want icon.png", parsed.Uploads[0].FileName)
+	}
+	if parsed.Uploads[0].ContentType != "image/png" {
+		t.Fatalf("content type = %q, want image/png", parsed.Uploads[0].ContentType)
+	}
+	if string(parsed.Uploads[0].Data) != "hello" {
+		t.Fatalf("upload data = %q, want hello", string(parsed.Uploads[0].Data))
+	}
+}

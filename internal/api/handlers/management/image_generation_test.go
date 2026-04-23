@@ -1,8 +1,10 @@
 package management
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -84,6 +86,102 @@ func TestPostImageGenerationTestExecutesCodexImageAlt(t *testing.T) {
 	}
 	if !strings.Contains(executor.payload, "test prompt") || !strings.Contains(executor.payload, "gpt-image-2") {
 		t.Fatalf("payload = %s, want prompt and model", executor.payload)
+	}
+	if !strings.Contains(executor.payload, `"size":"1024x1024"`) && strings.Contains(executor.payload, "size") {
+		t.Fatalf("payload = %s, should only include explicit size", executor.payload)
+	}
+}
+
+func TestPostImageGenerationTestForwardsGenerationOptions(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	executor := &managementImageExecutor{}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "codex-auth",
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Metadata: map[string]any{"access_token": "token"},
+	}); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+
+	h := &Handler{authManager: manager}
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	req := httptest.NewRequest(http.MethodPost, "/image-generation/test", strings.NewReader(`{
+		"prompt":"test prompt",
+		"size":"1024x1792",
+		"quality":"high",
+		"n":2
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	c.Request = req
+
+	h.PostImageGenerationTest(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if executor.alt != "images/generations" {
+		t.Fatalf("alt = %q, want images/generations", executor.alt)
+	}
+	for _, want := range []string{`"size":"1024x1792"`, `"quality":"high"`, `"n":2`} {
+		if !strings.Contains(executor.payload, want) {
+			t.Fatalf("payload = %s, want %s", executor.payload, want)
+		}
+	}
+}
+
+func TestPostImageGenerationTestAcceptsMultipartImageEdits(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	executor := &managementImageExecutor{}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "codex-auth",
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Metadata: map[string]any{"access_token": "token"},
+	}); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	_ = writer.WriteField("model", "gpt-image-2")
+	_ = writer.WriteField("prompt", "make it blue")
+	_ = writer.WriteField("size", "1792x1024")
+	_ = writer.WriteField("quality", "low")
+	_ = writer.WriteField("n", "2")
+	part, err := writer.CreateFormFile("image", "icon.png")
+	if err != nil {
+		t.Fatalf("CreateFormFile: %v", err)
+	}
+	_, _ = part.Write([]byte("hello"))
+	_ = writer.Close()
+
+	h := &Handler{authManager: manager}
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	req := httptest.NewRequest(http.MethodPost, "/image-generation/test", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	c.Request = req
+
+	h.PostImageGenerationTest(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if executor.alt != "images/edits" {
+		t.Fatalf("alt = %q, want images/edits", executor.alt)
+	}
+	for _, want := range []string{`"prompt":"make it blue"`, `"file_name":"icon.png"`, `"data_base64":"aGVsbG8="`, `"n":2`} {
+		if !strings.Contains(executor.payload, want) {
+			t.Fatalf("payload = %s, want %s", executor.payload, want)
+		}
 	}
 }
 

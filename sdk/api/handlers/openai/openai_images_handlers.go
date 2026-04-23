@@ -2,7 +2,13 @@ package openai
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"io"
+	"mime"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -15,7 +21,11 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-const openAIImageGenerationAlt = "images/generations"
+const (
+	openAIImageGenerationAlt = "images/generations"
+	openAIImageEditsAlt      = "images/edits"
+	openAIImageMaxUploadSize = 20 << 20
+)
 
 type OpenAIImagesAPIHandler struct {
 	*handlers.BaseAPIHandler
@@ -30,7 +40,18 @@ func (h *OpenAIImagesAPIHandler) Generations(c *gin.Context) {
 	if !ok {
 		return
 	}
+	h.executeImages(c, rawJSON, openAIImageGenerationAlt)
+}
 
+func (h *OpenAIImagesAPIHandler) Edits(c *gin.Context) {
+	rawJSON, ok := readOpenAIImageEditRequest(c)
+	if !ok {
+		return
+	}
+	h.executeImages(c, rawJSON, openAIImageEditsAlt)
+}
+
+func (h *OpenAIImagesAPIHandler) executeImages(c *gin.Context, rawJSON []byte, alt string) {
 	modelName := strings.TrimSpace(gjson.GetBytes(rawJSON, "model").String())
 	if modelName == "" {
 		modelName = "gpt-image-2"
@@ -54,7 +75,7 @@ func (h *OpenAIImagesAPIHandler) Generations(c *gin.Context) {
 		Payload: rawJSON,
 		Format:  sdktranslator.FromString("openai"),
 	}, coreexecutor.Options{
-		Alt:             openAIImageGenerationAlt,
+		Alt:             alt,
 		OriginalRequest: rawJSON,
 		SourceFormat:    sdktranslator.FromString("openai"),
 		Metadata:        meta,
@@ -70,6 +91,103 @@ func (h *OpenAIImagesAPIHandler) Generations(c *gin.Context) {
 
 	handlers.WriteUpstreamHeaders(c.Writer.Header(), resp.Headers)
 	c.Data(http.StatusOK, "application/json; charset=utf-8", resp.Payload)
+}
+
+func readOpenAIImageEditRequest(c *gin.Context) ([]byte, bool) {
+	contentType := strings.TrimSpace(c.GetHeader("Content-Type"))
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err == nil && strings.EqualFold(mediaType, "multipart/form-data") {
+		payload, parseErr := buildOpenAIImageEditPayloadFromMultipart(c)
+		if parseErr != nil {
+			writeOpenAIImagesError(c, http.StatusBadRequest, "invalid_request_error", parseErr.Error())
+			return nil, false
+		}
+		return payload, true
+	}
+	rawJSON, ok := handlers.ReadJSONRequestBody(c)
+	if !ok {
+		return nil, false
+	}
+	return rawJSON, true
+}
+
+func buildOpenAIImageEditPayloadFromMultipart(c *gin.Context) ([]byte, error) {
+	if err := c.Request.ParseMultipartForm(openAIImageMaxUploadSize); err != nil {
+		return nil, fmt.Errorf("invalid multipart body")
+	}
+	form := c.Request.MultipartForm
+	if form == nil {
+		return nil, fmt.Errorf("invalid multipart body")
+	}
+	payload := map[string]any{
+		"model":  firstOpenAIImagesFormValue(form.Value, "model", "gpt-image-2"),
+		"prompt": firstOpenAIImagesFormValue(form.Value, "prompt", ""),
+	}
+	for _, field := range []string{"size", "quality", "response_format"} {
+		if value := firstOpenAIImagesFormValue(form.Value, field, ""); value != "" {
+			payload[field] = value
+		}
+	}
+	if value := firstOpenAIImagesFormValue(form.Value, "n", ""); value != "" {
+		n, err := strconv.Atoi(value)
+		if err != nil {
+			return nil, fmt.Errorf("n must be a positive integer")
+		}
+		payload["n"] = n
+	}
+	files := form.File["image"]
+	for key, value := range form.File {
+		if strings.HasPrefix(key, "image[") {
+			files = append(files, value...)
+		}
+	}
+	if len(files) == 0 {
+		return nil, fmt.Errorf("image file is required")
+	}
+	uploads := make([]map[string]any, 0, len(files))
+	for _, fileHeader := range files {
+		if fileHeader == nil {
+			continue
+		}
+		if fileHeader.Size > openAIImageMaxUploadSize {
+			return nil, fmt.Errorf("image file is too large")
+		}
+		file, err := fileHeader.Open()
+		if err != nil {
+			return nil, fmt.Errorf("read image file: %w", err)
+		}
+		data, err := io.ReadAll(io.LimitReader(file, openAIImageMaxUploadSize+1))
+		_ = file.Close()
+		if err != nil {
+			return nil, fmt.Errorf("read image file: %w", err)
+		}
+		if len(data) == 0 {
+			return nil, fmt.Errorf("image file is empty")
+		}
+		if len(data) > openAIImageMaxUploadSize {
+			return nil, fmt.Errorf("image file is too large")
+		}
+		contentType := strings.TrimSpace(fileHeader.Header.Get("Content-Type"))
+		if contentType == "" {
+			contentType = "application/octet-stream"
+		}
+		uploads = append(uploads, map[string]any{
+			"file_name":    fileHeader.Filename,
+			"content_type": contentType,
+			"data_base64":  base64.StdEncoding.EncodeToString(data),
+		})
+	}
+	payload["image_files"] = uploads
+	return json.Marshal(payload)
+}
+
+func firstOpenAIImagesFormValue(values map[string][]string, key, fallback string) string {
+	for _, value := range values[key] {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return fallback
 }
 
 func requestImageExecutionMetadata(c *gin.Context) map[string]any {
