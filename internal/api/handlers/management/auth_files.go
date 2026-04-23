@@ -52,6 +52,7 @@ const (
 	geminiCLIUserAgent                        = "google-api-nodejs-client/9.15.1"
 	geminiCLIApiClient                        = "gl-node/22.17.0"
 	geminiCLIClientMetadata                   = "ideType=IDE_UNSPECIFIED,platform=PLATFORM_UNSPECIFIED,pluginType=GEMINI"
+	oauthCallbackWaitTimeout                  = oauthSessionTTL
 	managementOAuthProfileResponseLimit int64 = 64 << 10
 	managementGCPProjectListLimit       int64 = 1 << 20
 	managementServiceUsageResponseLimit int64 = 128 << 10
@@ -1103,8 +1104,8 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 		}
 
 		fmt.Println("Waiting for authentication callback...")
-		// Wait up to 5 minutes
-		resultMap, errWait := waitForFile(waitFile, 5*time.Minute)
+		// Keep the callback waiter alive for the full session lifetime.
+		resultMap, errWait := waitForFile(waitFile, oauthCallbackWaitTimeout)
 		if errWait != nil {
 			if errors.Is(errWait, errOAuthSessionNotPending) {
 				return
@@ -1227,7 +1228,7 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 		// Wait for callback file written by server route
 		waitFile := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-gemini-%s.oauth", state))
 		fmt.Println("Waiting for authentication callback...")
-		deadline := time.Now().Add(5 * time.Minute)
+		deadline := time.Now().Add(oauthCallbackWaitTimeout)
 		var authCode string
 		for {
 			if !IsOAuthSessionPending(state, "gemini") {
@@ -1502,7 +1503,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 
 		// Wait for callback file
 		waitFile := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-codex-%s.oauth", state))
-		deadline := time.Now().Add(5 * time.Minute)
+		deadline := time.Now().Add(oauthCallbackWaitTimeout)
 		var code string
 		for {
 			if !IsOAuthSessionPending(state, "codex") {
@@ -1635,7 +1636,7 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 		}
 
 		waitFile := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-antigravity-%s.oauth", state))
-		deadline := time.Now().Add(5 * time.Minute)
+		deadline := time.Now().Add(oauthCallbackWaitTimeout)
 		var authCode string
 		for {
 			if !IsOAuthSessionPending(state, "antigravity") {
@@ -1923,7 +1924,7 @@ func (h *Handler) RequestIFlowToken(c *gin.Context) {
 		fmt.Println("Waiting for authentication...")
 
 		waitFile := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-iflow-%s.oauth", state))
-		deadline := time.Now().Add(5 * time.Minute)
+		deadline := time.Now().Add(oauthCallbackWaitTimeout)
 		var resultMap map[string]string
 		for {
 			if !IsOAuthSessionPending(state, "iflow") {

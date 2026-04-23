@@ -46,3 +46,38 @@ func TestPostOAuthCallbackAcceptsAlreadyProcessedState(t *testing.T) {
 		t.Fatalf("expected already_processed response, got %s", rec.Body.String())
 	}
 }
+
+func TestPostOAuthCallbackReturnsSessionStatusWhenFlowIsNoLongerPending(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	previousStore := oauthSessions
+	oauthSessions = newOAuthSessionStore(time.Minute)
+	t.Cleanup(func() {
+		oauthSessions = previousStore
+	})
+
+	RegisterOAuthSession("session-timeout", "codex")
+	SetOAuthSessionError("session-timeout", "Timeout waiting for OAuth callback")
+
+	h := &Handler{
+		cfg: &config.Config{
+			AuthDir: t.TempDir(),
+		},
+	}
+
+	body := []byte(`{"provider":"codex","redirect_url":"http://localhost:1455/auth/callback?code=test-code&state=session-timeout"}`)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	req := httptest.NewRequest(http.MethodPost, "/oauth-callback", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	c.Request = req
+
+	h.PostOAuthCallback(c)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusConflict, rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`Timeout waiting for OAuth callback`)) {
+		t.Fatalf("expected session status in response, got %s", rec.Body.String())
+	}
+}
